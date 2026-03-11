@@ -70,11 +70,21 @@ npm run db:migrate:prod
 
 ## Authentication
 
-- JWT-based authentication
-- 8-hour session cookies
-- Credentials stored as Cloudflare Worker secrets:
-  - `APP_USERNAME`
-  - `APP_PASSWORD`
+- JWT-based authentication with 8-hour session cookies
+- **Settings Page** (`/settings`): Manage credentials directly in the app
+  - Username and password management
+  - Anthropic API key configuration (for Word document AI parsing)
+  - Passwords are securely hashed with PBKDF2
+  - API keys are encrypted with AES-GCM
+  - Changes take effect immediately (no redeploy needed)
+  
+### First Login After Migration
+On first login, use the existing Cloudflare secrets credentials (`ncpalivesound`/`hangover123`). After logging in, visit Settings to configure your credentials.
+
+### Fallback Credentials
+If the app_settings table doesn't exist, these Cloudflare Worker secrets are used:
+- `APP_USERNAME`
+- `APP_PASSWORD`
 
 ## Deployment
 
