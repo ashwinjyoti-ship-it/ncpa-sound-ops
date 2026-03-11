@@ -1,0 +1,28 @@
+{
+  "name": "ncpa-sound-ops",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "dev:sandbox": "wrangler pages dev dist --d1=ncpa-sound-crew-db --local --ip 0.0.0.0 --port 3000",
+    "build": "vite build",
+    "preview": "wrangler pages dev",
+    "deploy": "npm run build && wrangler pages deploy",
+    "deploy:prod": "npm run build && wrangler pages deploy dist --project-name ncpa-sound-ops",
+    "cf-typegen": "wrangler types --env-interface CloudflareBindings",
+    "db:migrate:local": "wrangler d1 migrations apply ncpa-sound-crew-db --local",
+    "db:migrate:prod": "wrangler d1 migrations apply ncpa-sound-crew-db",
+    "db:seed": "wrangler d1 execute ncpa-sound-crew-db --local --file=./seed.sql"
+  },
+  "dependencies": {
+    "hono": "^4.10.2"
+  },
+  "devDependencies": {
+    "@hono/vite-build": "^1.2.0",
+    "@hono/vite-dev-server": "^0.18.2",
+    "tailwindcss": "^3.4.0",
+    "autoprefixer": "^10.4.16",
+    "postcss": "^8.4.32",
+    "vite": "^6.3.5",
+    "wrangler": "^4.4.0"
+  }
+}
