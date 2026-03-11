@@ -1,1068 +1,1197 @@
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
-import { setCookie, getCookie } from 'hono/cookie'
-import { renderer } from './renderer'
+import { serveStatic } from 'hono/cloudflare-workers'
 import type { Env } from './types'
+import { handleRAGQuery } from './rag-endpoint'
+import { generateEventEmbedding } from './rag-utils'
+import { backfillEmbeddings } from './backfill-embeddings'
+import { 
+  setupFilteringEndpoints,
+  setupConflictDetection,
+  setupBulkAssignment,
+  setupDashboardEndpoints,
+  setupExportEndpoints
+} from './v41-endpoints'
+import { setupCrewAssignmentEngine } from './crew-assignment-engine'
+import { setupAuthEndpoints } from './auth-endpoints'
+import { setupCrewStatsEndpoints } from './crew-stats-endpoints'
 
-// ============================================
-// CRYPTO HELPERS - Password Hashing & Encryption
-// ============================================
-const ENCRYPTION_KEY_DERIVATION = 'NCPA-SOUND-OPS-KEY-2024'
-
-async function hashPassword(password: string, salt?: string): Promise<{ hash: string, salt: string }> {
-  const encoder = new TextEncoder()
-  const saltBytes = salt ? hexToBytes(salt) : crypto.getRandomValues(new Uint8Array(16))
-  
-  const keyMaterial = await crypto.subtle.importKey(
-    'raw', encoder.encode(password), 'PBKDF2', false, ['deriveBits']
-  )
-  
-  const derivedBits = await crypto.subtle.deriveBits(
-    { name: 'PBKDF2', salt: saltBytes, iterations: 100000, hash: 'SHA-256' },
-    keyMaterial, 256
-  )
-  
-  return {
-    hash: bytesToHex(new Uint8Array(derivedBits)),
-    salt: bytesToHex(saltBytes)
-  }
+type Bindings = {
+  DB: D1Database;
+  AI: any;
+  VECTORIZE: any; // Vectorize enabled for semantic search
+  ANTHROPIC_API_KEY: string;
 }
 
-async function verifyPassword(password: string, storedHash: string, storedSalt: string): Promise<boolean> {
-  const { hash } = await hashPassword(password, storedSalt)
-  return hash === storedHash
-}
+const app = new Hono<{ Bindings: Bindings }>()
 
-async function encryptApiKey(apiKey: string, masterPassword: string): Promise<{ encrypted: string, iv: string }> {
-  const encoder = new TextEncoder()
-  const iv = crypto.getRandomValues(new Uint8Array(12))
-  
-  const keyMaterial = await crypto.subtle.importKey(
-    'raw', encoder.encode(masterPassword + ENCRYPTION_KEY_DERIVATION), 'PBKDF2', false, ['deriveKey']
-  )
-  
-  const key = await crypto.subtle.deriveKey(
-    { name: 'PBKDF2', salt: encoder.encode('ncpa-salt'), iterations: 100000, hash: 'SHA-256' },
-    keyMaterial, { name: 'AES-GCM', length: 256 }, false, ['encrypt']
-  )
-  
-  const encrypted = await crypto.subtle.encrypt(
-    { name: 'AES-GCM', iv }, key, encoder.encode(apiKey)
-  )
-  
-  return {
-    encrypted: bytesToHex(new Uint8Array(encrypted)),
-    iv: bytesToHex(iv)
-  }
-}
-
-async function decryptApiKey(encrypted: string, iv: string, masterPassword: string): Promise<string | null> {
-  try {
-    const encoder = new TextEncoder()
-    const decoder = new TextDecoder()
-    
-    const keyMaterial = await crypto.subtle.importKey(
-      'raw', encoder.encode(masterPassword + ENCRYPTION_KEY_DERIVATION), 'PBKDF2', false, ['deriveKey']
-    )
-    
-    const key = await crypto.subtle.deriveKey(
-      { name: 'PBKDF2', salt: encoder.encode('ncpa-salt'), iterations: 100000, hash: 'SHA-256' },
-      keyMaterial, { name: 'AES-GCM', length: 256 }, false, ['decrypt']
-    )
-    
-    const decrypted = await crypto.subtle.decrypt(
-      { name: 'AES-GCM', iv: hexToBytes(iv) }, key, hexToBytes(encrypted)
-    )
-    
-    return decoder.decode(decrypted)
-  } catch {
-    return null
-  }
-}
-
-function bytesToHex(bytes: Uint8Array): string {
-  return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('')
-}
-
-function hexToBytes(hex: string): Uint8Array {
-  const bytes = new Uint8Array(hex.length / 2)
-  for (let i = 0; i < bytes.length; i++) {
-    bytes[i] = parseInt(hex.substr(i * 2, 2), 16)
-  }
-  return bytes
-}
-
-function generateJwtSecret(): string {
-  const bytes = crypto.getRandomValues(new Uint8Array(32))
-  return bytesToHex(bytes)
-}
-
-// ============================================
-// STYLES - Teenage Engineering Dark Ops Theme
-// ============================================
-const STYLES = `
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { 
-    font-family: 'JetBrains Mono', 'Fira Code', monospace;
-    background: #0a0a0a;
-    color: #e5e5e5;
-    min-height: 100vh;
-  }
-  .container { max-width: 1400px; margin: 0 auto; padding: 1rem; }
-  .nav { 
-    display: flex; gap: 0.5rem; margin-bottom: 1.5rem; 
-    border-bottom: 1px solid #262626; padding-bottom: 1rem;
-  }
-  .nav-link { 
-    padding: 0.5rem 1rem; 
-    background: #141414; 
-    border: 1px solid #262626; 
-    color: #e5e5e5; 
-    text-decoration: none;
-    font-size: 0.75rem;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    cursor: pointer;
-  }
-  .nav-link:hover, .nav-link.active { 
-    background: #f59e0b; 
-    color: #0a0a0a; 
-    border-color: #f59e0b;
-  }
-  .card { 
-    background: #141414; 
-    border: 1px solid #262626; 
-    padding: 1rem; 
-    margin-bottom: 1rem;
-  }
-  .card-header {
-    font-size: 0.875rem;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    margin-bottom: 1rem;
-    color: #f59e0b;
-  }
-  input, select, textarea { 
-    font-family: inherit;
-    background: #0a0a0a; 
-    border: 1px solid #262626; 
-    color: #e5e5e5; 
-    padding: 0.5rem; 
-    font-size: 0.8rem;
-    width: 100%;
-  }
-  input:focus, select:focus, textarea:focus { 
-    outline: none; 
-    border-color: #f59e0b; 
-  }
-  button { 
-    font-family: inherit;
-    padding: 0.5rem 1rem; 
-    background: #262626; 
-    border: 1px solid #404040; 
-    color: #e5e5e5; 
-    cursor: pointer;
-    font-size: 0.75rem;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-  }
-  button:hover { background: #404040; }
-  button.primary { background: #f59e0b; color: #0a0a0a; border-color: #f59e0b; }
-  button.primary:hover { background: #d97706; }
-  button.danger { background: #dc2626; border-color: #dc2626; }
-  button.danger:hover { background: #b91c1c; }
-  .grid { display: grid; gap: 1rem; }
-  .grid-2 { grid-template-columns: repeat(2, 1fr); }
-  .grid-3 { grid-template-columns: repeat(3, 1fr); }
-  .flex { display: flex; }
-  .flex-between { justify-content: space-between; }
-  .flex-center { align-items: center; }
-  .gap-1 { gap: 0.5rem; }
-  .gap-2 { gap: 1rem; }
-  .mb-1 { margin-bottom: 0.5rem; }
-  .mb-2 { margin-bottom: 1rem; }
-  .text-sm { font-size: 0.75rem; }
-  .text-muted { color: #737373; }
-  .text-accent { color: #f59e0b; }
-  .text-success { color: #22c55e; }
-  .text-danger { color: #ef4444; }
-  table { width: 100%; border-collapse: collapse; font-size: 0.75rem; }
-  th, td { 
-    padding: 0.5rem; 
-    text-align: left; 
-    border-bottom: 1px solid #262626;
-  }
-  th { 
-    background: #1a1a1a; 
-    font-weight: 500;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: #737373;
-  }
-  tr:hover { background: #1a1a1a; }
-  .autocomplete { position: relative; }
-  .autocomplete-list {
-    position: absolute;
-    top: 100%;
-    left: 0;
-    right: 0;
-    background: #141414;
-    border: 1px solid #262626;
-    border-top: none;
-    max-height: 200px;
-    overflow-y: auto;
-    z-index: 100;
-  }
-  .autocomplete-item {
-    padding: 0.5rem;
-    cursor: pointer;
-    font-size: 0.75rem;
-  }
-  .autocomplete-item:hover { background: #262626; }
-  .equipment-row {
-    display: grid;
-    grid-template-columns: 1fr 80px 40px;
-    gap: 0.5rem;
-    margin-bottom: 0.5rem;
-    align-items: center;
-  }
-  .quote-table th { background: #1a3a2a; color: #22c55e; }
-  .quote-total { background: #1a3a2a; font-weight: 600; }
-  .login-container {
-    max-width: 400px;
-    margin: 100px auto;
-    padding: 2rem;
-  }
-  .login-title {
-    font-size: 1.5rem;
-    font-weight: 600;
-    margin-bottom: 2rem;
-    text-align: center;
-    color: #f59e0b;
-  }
-  .calendar-grid {
-    display: grid;
-    grid-template-columns: repeat(7, 1fr);
-    gap: 2px;
-    background: #262626;
-  }
-  .calendar-day {
-    background: #141414;
-    min-height: 100px;
-    padding: 0.25rem;
-  }
-  .calendar-day-header {
-    font-size: 0.65rem;
-    color: #737373;
-    margin-bottom: 0.25rem;
-  }
-  .calendar-event {
-    font-size: 0.6rem;
-    padding: 2px 4px;
-    margin-bottom: 2px;
-    background: #262626;
-    border-left: 2px solid #f59e0b;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .today { border: 1px solid #f59e0b; }
-  .badge {
-    display: inline-block;
-    padding: 0.125rem 0.375rem;
-    font-size: 0.625rem;
-    text-transform: uppercase;
-    border-radius: 2px;
-  }
-  .badge-senior { background: #7c3aed; }
-  .badge-mid { background: #2563eb; }
-  .badge-junior { background: #059669; }
-  .badge-hired { background: #737373; }
-  .day-off-calendar {
-    display: grid;
-    grid-template-columns: repeat(7, 1fr);
-    gap: 4px;
-  }
-  .day-off-cell {
-    aspect-ratio: 1;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 0.7rem;
-    background: #141414;
-    border: 1px solid #262626;
-    cursor: pointer;
-  }
-  .day-off-cell.unavailable { background: #dc2626; border-color: #dc2626; }
-  .day-off-cell.weekend { background: #1a1a1a; }
-  .workflow-steps {
-    display: flex;
-    gap: 0.5rem;
-    margin-bottom: 1.5rem;
-    overflow-x: auto;
-  }
-  .workflow-step {
-    padding: 0.5rem 1rem;
-    background: #1a1a1a;
-    border: 1px solid #262626;
-    font-size: 0.7rem;
-    white-space: nowrap;
-    cursor: pointer;
-  }
-  .workflow-step.active { background: #f59e0b; color: #0a0a0a; border-color: #f59e0b; }
-  .workflow-step.completed { background: #065f46; border-color: #059669; }
-  .diff-preview {
-    background: #1a2e1a;
-    border: 1px solid #22c55e;
-    padding: 1rem;
-    margin: 1rem 0;
-    font-size: 0.75rem;
-  }
-  .diff-add { color: #22c55e; }
-  .diff-remove { color: #ef4444; }
-`
-
-const app = new Hono<Env>()
-
-// CORS
+// Enable CORS for all routes (Safari compatibility)
 app.use('*', cors({
   origin: '*',
   allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowHeaders: ['Content-Type', 'Authorization'],
+  exposeHeaders: ['Content-Length', 'X-Request-Id'],
+  maxAge: 86400,
+  credentials: false
 }))
 
-// ============================================
-// JWT AUTH HELPERS
-// ============================================
-async function createJWT(payload: object, secret: string): Promise<string> {
-  const header = { alg: 'HS256', typ: 'JWT' }
-  const encoder = new TextEncoder()
-  
-  const headerB64 = btoa(JSON.stringify(header)).replace(/=/g, '')
-  const payloadB64 = btoa(JSON.stringify(payload)).replace(/=/g, '')
-  const data = `${headerB64}.${payloadB64}`
-  
-  const key = await crypto.subtle.importKey(
-    'raw', encoder.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
-  )
-  const sig = await crypto.subtle.sign('HMAC', key, encoder.encode(data))
-  const sigB64 = btoa(String.fromCharCode(...new Uint8Array(sig))).replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_')
-  
-  return `${data}.${sigB64}`
-}
-
-async function verifyJWT(token: string, secret: string): Promise<{ valid: boolean, payload?: any }> {
-  try {
-    const parts = token.split('.')
-    if (parts.length !== 3) return { valid: false }
-    
-    const [headerB64, payloadB64, sigB64] = parts
-    const encoder = new TextEncoder()
-    const data = `${headerB64}.${payloadB64}`
-    
-    const key = await crypto.subtle.importKey(
-      'raw', encoder.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['verify']
-    )
-    
-    const sig = Uint8Array.from(atob(sigB64.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0))
-    const valid = await crypto.subtle.verify('HMAC', key, sig, encoder.encode(data))
-    
-    if (!valid) return { valid: false }
-    
-    const payload = JSON.parse(atob(payloadB64))
-    if (payload.exp && Date.now() / 1000 > payload.exp) return { valid: false }
-    
-    return { valid: true, payload }
-  } catch {
-    return { valid: false }
-  }
-}
+// Serve static files
+app.use('/static/*', serveStatic({ root: './public' }))
 
 // ============================================
-// AUTH MIDDLEWARE
+// API ROUTES
 // ============================================
-async function authMiddleware(c: any, next: () => Promise<void>) {
-  const path = new URL(c.req.url).pathname
-  
-  // Public paths
-  if (path === '/login' || path === '/api/auth/login' || path.startsWith('/static')) {
-    return next()
-  }
-  
-  const token = getCookie(c, 'auth_token')
-  if (!token) {
-    if (path.startsWith('/api/')) {
-      return c.json({ error: 'Unauthorized' }, 401)
-    }
-    return c.redirect('/login')
-  }
-  
-  // Get JWT secret from D1 or fallback to env
-  let secret = c.env.APP_PASSWORD || 'default-secret-change-me'
-  try {
-    const settings = await c.env.DB.prepare('SELECT jwt_secret FROM app_settings WHERE id = 1').first() as any
-    if (settings && settings.jwt_secret && settings.jwt_secret !== 'NEEDS_INIT') {
-      secret = settings.jwt_secret
-    }
-  } catch (e) {
-    // Fallback to env secret if D1 fails
-  }
-  
-  const result = await verifyJWT(token, secret)
-  
-  if (!result.valid) {
-    if (path.startsWith('/api/')) {
-      return c.json({ error: 'Invalid or expired token' }, 401)
-    }
-    return c.redirect('/login')
-  }
-  
-  return next()
-}
 
-app.use('*', authMiddleware)
-
-// ============================================
-// AUTH ROUTES
-// ============================================
-app.get('/login', (c) => {
-  return c.html(`
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <meta charset="UTF-8">
-      <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <title>NCPA Sound Ops - Login</title>
-      <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-      <style>${STYLES}</style>
-    </head>
-    <body>
-      <div class="login-container card">
-        <h1 class="login-title">NCPA SOUND OPS</h1>
-        <form id="loginForm">
-          <div class="mb-2">
-            <label class="text-sm text-muted">Username</label>
-            <input type="text" name="username" required autocomplete="username" />
-          </div>
-          <div class="mb-2">
-            <label class="text-sm text-muted">Password</label>
-            <input type="password" name="password" required autocomplete="current-password" />
-          </div>
-          <div id="error" class="text-danger text-sm mb-2" style="display:none;"></div>
-          <button type="submit" class="primary" style="width:100%;">Login</button>
-        </form>
-      </div>
-      <script>
-        document.getElementById('loginForm').onsubmit = async (e) => {
-          e.preventDefault();
-          const form = e.target;
-          const error = document.getElementById('error');
-          error.style.display = 'none';
-          
-          try {
-            const res = await fetch('/api/auth/login', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                username: form.username.value,
-                password: form.password.value
-              })
-            });
-            const data = await res.json();
-            if (data.success) {
-              window.location.href = '/';
-            } else {
-              error.textContent = data.error || 'Login failed';
-              error.style.display = 'block';
-            }
-          } catch (err) {
-            error.textContent = 'Network error';
-            error.style.display = 'block';
-          }
-        };
-      </script>
-    </body>
-    </html>
-  `)
-})
-
-app.post('/api/auth/login', async (c) => {
-  const { username, password } = await c.req.json()
-  
-  try {
-    // Get settings from D1
-    const settings = await c.env.DB.prepare('SELECT * FROM app_settings WHERE id = 1').first() as any
-    
-    if (!settings) {
-      // Fallback to env vars if no settings in DB
-      const validUser = c.env.APP_USERNAME || 'admin'
-      const validPass = c.env.APP_PASSWORD || 'admin123'
-      
-      if (username !== validUser || password !== validPass) {
-        return c.json({ success: false, error: 'Invalid credentials' }, 401)
-      }
-      
-      const token = await createJWT(
-        { user: username, exp: Math.floor(Date.now() / 1000) + (8 * 60 * 60) },
-        validPass
-      )
-      
-      setCookie(c, 'auth_token', token, {
-        httpOnly: true, secure: true, sameSite: 'Lax', maxAge: 8 * 60 * 60, path: '/'
-      })
-      return c.json({ success: true })
-    }
-    
-    // Check if password needs initialization (first login after migration)
-    if (settings.password_hash === 'NEEDS_INIT') {
-      // Use fallback credentials for first login
-      const validUser = c.env.APP_USERNAME || 'ncpalivesound'
-      const validPass = c.env.APP_PASSWORD || 'hangover123'
-      
-      if (username !== validUser || password !== validPass) {
-        return c.json({ success: false, error: 'Invalid credentials' }, 401)
-      }
-      
-      // Initialize the password hash and JWT secret in D1
-      const { hash, salt } = await hashPassword(password)
-      const jwtSecret = generateJwtSecret()
-      await c.env.DB.prepare(
-        'UPDATE app_settings SET password_hash = ?, password_salt = ?, jwt_secret = ?, username = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1'
-      ).bind(hash, salt, jwtSecret, username).run()
-      
-      const token = await createJWT(
-        { user: username, exp: Math.floor(Date.now() / 1000) + (8 * 60 * 60) },
-        jwtSecret
-      )
-      
-      setCookie(c, 'auth_token', token, {
-        httpOnly: true, secure: true, sameSite: 'Lax', maxAge: 8 * 60 * 60, path: '/'
-      })
-      return c.json({ success: true })
-    }
-    
-    // Normal login - verify against D1
-    if (username !== settings.username) {
-      return c.json({ success: false, error: 'Invalid credentials' }, 401)
-    }
-    
-    const passwordValid = await verifyPassword(password, settings.password_hash, settings.password_salt)
-    if (!passwordValid) {
-      return c.json({ success: false, error: 'Invalid credentials' }, 401)
-    }
-    
-    const token = await createJWT(
-      { user: username, exp: Math.floor(Date.now() / 1000) + (8 * 60 * 60) },
-      settings.jwt_secret
-    )
-    
-    setCookie(c, 'auth_token', token, {
-      httpOnly: true, secure: true, sameSite: 'Lax', maxAge: 8 * 60 * 60, path: '/'
-    })
-    
-    return c.json({ success: true })
-  } catch (error: any) {
-    console.error('Login error:', error)
-    return c.json({ success: false, error: 'Login failed' }, 500)
-  }
-})
-
-app.post('/api/auth/logout', (c) => {
-  setCookie(c, 'auth_token', '', { maxAge: 0, path: '/' })
-  return c.json({ success: true })
-})
-
-// ============================================
-// EVENTS API (Schedule Module)
-// ============================================
+// Get all events
 app.get('/api/events', async (c) => {
   try {
-    const { results } = await c.env.DB.prepare('SELECT * FROM events ORDER BY event_date ASC').all()
+    const { results } = await c.env.DB.prepare(`
+      SELECT * FROM events ORDER BY event_date ASC
+    `).all()
+    
     return c.json({ success: true, data: results })
   } catch (error: any) {
     return c.json({ success: false, error: error.message }, 500)
   }
 })
 
+// Get events by date range (for calendar view)
 app.get('/api/events/range', async (c) => {
   try {
-    const start = c.req.query('start')
-    const end = c.req.query('end')
-    if (!start || !end) return c.json({ success: false, error: 'Start and end required' }, 400)
+    const startDate = c.req.query('start')
+    const endDate = c.req.query('end')
     
-    const { results } = await c.env.DB.prepare(
-      'SELECT * FROM events WHERE event_date >= ? AND event_date <= ? ORDER BY event_date ASC'
-    ).bind(start, end).all()
+    if (!startDate || !endDate) {
+      return c.json({ success: false, error: 'Start and end dates required' }, 400)
+    }
+    
+    const { results } = await c.env.DB.prepare(`
+      SELECT * FROM events 
+      WHERE event_date >= ? AND event_date <= ?
+      ORDER BY event_date ASC
+    `).bind(startDate, endDate).all()
+    
     return c.json({ success: true, data: results })
   } catch (error: any) {
     return c.json({ success: false, error: error.message }, 500)
   }
 })
 
-app.get('/api/events/month/:month', async (c) => {
-  try {
-    const month = c.req.param('month') // YYYY-MM
-    const { results } = await c.env.DB.prepare(
-      "SELECT * FROM events WHERE strftime('%Y-%m', event_date) = ? ORDER BY event_date ASC"
-    ).bind(month).all()
-    return c.json({ success: true, data: results })
-  } catch (error: any) {
-    return c.json({ success: false, error: error.message }, 500)
-  }
-})
-
+// Search events (MUST be before /:id route)
 app.get('/api/events/search', async (c) => {
   try {
-    const q = c.req.query('q')
-    if (!q) return c.json({ success: false, error: 'Query required' }, 400)
+    const query = c.req.query('q')
     
-    const term = `%${q}%`
-    const { results } = await c.env.DB.prepare(
-      `SELECT * FROM events WHERE program LIKE ? OR venue LIKE ? OR team LIKE ? OR crew LIKE ? 
-       ORDER BY event_date DESC LIMIT 50`
-    ).bind(term, term, term, term).all()
+    if (!query) {
+      return c.json({ success: false, error: 'Search query required' }, 400)
+    }
+    
+    const searchTerm = `%${query}%`
+    
+    const { results } = await c.env.DB.prepare(`
+      SELECT * FROM events 
+      WHERE program LIKE ? 
+         OR venue LIKE ? 
+         OR team LIKE ?
+         OR crew LIKE ?
+         OR sound_requirements LIKE ?
+      ORDER BY event_date DESC
+      LIMIT 50
+    `).bind(searchTerm, searchTerm, searchTerm, searchTerm, searchTerm).all()
+    
     return c.json({ success: true, data: results })
   } catch (error: any) {
     return c.json({ success: false, error: error.message }, 500)
   }
 })
 
-app.post('/api/events', async (c) => {
+// ============================================
+// GOOGLE SHEETS AUTO-SYNC: CSV EXPORT ENDPOINT
+// ============================================
+// Permanent URL for Google Sheets IMPORTDATA() function
+// Usage in Google Sheets: =IMPORTDATA("https://ncpa-sound.pages.dev/api/export/latest-csv")
+// Auto-refreshes every hour
+app.get('/api/export/latest-csv', async (c) => {
   try {
-    const event = await c.req.json()
-    const { results } = await c.env.DB.prepare(
-      `INSERT INTO events (event_date, program, venue, team, sound_requirements, call_time, crew)
-       VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING *`
-    ).bind(
-      event.event_date, event.program, event.venue, event.team || '',
-      event.sound_requirements || '', event.call_time || '', event.crew || ''
-    ).all()
-    return c.json({ success: true, data: results[0] })
+    const { results } = await c.env.DB.prepare(`
+      SELECT 
+        event_date as "Date",
+        program as "Program",
+        venue as "Venue",
+        team as "Team",
+        crew as "Crew",
+        sound_requirements as "Sound Requirements",
+        call_time as "Call Time",
+        status as "Status"
+      FROM events 
+      ORDER BY event_date ASC
+    `).all()
+    
+    if (!results || results.length === 0) {
+      return new Response('Date,Program,Venue,Team,Crew,Sound Requirements,Call Time,Status\n', {
+        headers: {
+          'Content-Type': 'text/csv; charset=utf-8',
+          'Content-Disposition': 'inline; filename="ncpa-events-latest.csv"',
+          'Cache-Control': 'no-cache, no-store, must-revalidate'
+        }
+      })
+    }
+    
+    // Helper to escape CSV values
+    const escapeCSV = (val: any): string => {
+      if (val === null || val === undefined) return ''
+      const str = String(val)
+      // Escape quotes and wrap in quotes if contains comma, quote, or newline
+      if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+        return `"${str.replace(/"/g, '""')}"`
+      }
+      return str
+    }
+    
+    // Build CSV header
+    const headers = ['Date', 'Program', 'Venue', 'Team', 'Crew', 'Sound Requirements', 'Call Time', 'Status']
+    const csvRows = [headers.join(',')]
+    
+    // Add data rows
+    results.forEach((row: any) => {
+      const values = [
+        escapeCSV(row.Date),
+        escapeCSV(row.Program),
+        escapeCSV(row.Venue),
+        escapeCSV(row.Team),
+        escapeCSV(row.Crew),
+        escapeCSV(row['Sound Requirements']),
+        escapeCSV(row['Call Time']),
+        escapeCSV(row.Status || 'confirmed')
+      ]
+      csvRows.push(values.join(','))
+    })
+    
+    const csv = csvRows.join('\n')
+    
+    return new Response(csv, {
+      headers: {
+        'Content-Type': 'text/csv; charset=utf-8',
+        'Content-Disposition': 'inline; filename="ncpa-events-latest.csv"',
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Access-Control-Allow-Origin': '*'
+      }
+    })
   } catch (error: any) {
     return c.json({ success: false, error: error.message }, 500)
   }
 })
 
+// ============================================
+// MONTHLY CSV EXPORT (Manual month selection)
+// ============================================
+// For early month preparation (e.g., upload Jan data in Dec, populate sheet in Dec)
+// Usage: =IMPORTDATA("https://ncpa-sound.pages.dev/api/export/csv?month=2026-01")
+// Column order: Date, Crew, Program, Venue, Team, Sound Requirements, Call Time
+app.get('/api/export/csv', async (c) => {
+  try {
+    const month = c.req.query('month') // Format: YYYY-MM (e.g., "2026-01")
+    
+    if (!month) {
+      return c.json({ 
+        success: false, 
+        error: 'Month parameter required. Use: ?month=YYYY-MM (e.g., ?month=2026-01)' 
+      }, 400)
+    }
+    
+    // Validate format
+    if (!/^\d{4}-\d{2}$/.test(month)) {
+      return c.json({ 
+        success: false, 
+        error: 'Invalid month format. Use: YYYY-MM (e.g., 2026-01)' 
+      }, 400)
+    }
+    
+    const { results } = await c.env.DB.prepare(`
+      SELECT 
+        event_date as "Date",
+        crew as "Crew",
+        program as "Program",
+        venue as "Venue",
+        team as "Team",
+        sound_requirements as "Sound Requirements",
+        call_time as "Call Time"
+      FROM events 
+      WHERE strftime('%Y-%m', event_date) = ?
+      ORDER BY event_date ASC
+    `).bind(month).all()
+    
+    // Helper to escape CSV values
+    const escapeCSV = (val: any): string => {
+      if (val === null || val === undefined) return ''
+      const str = String(val)
+      // Escape quotes and wrap in quotes if contains comma, quote, or newline
+      if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+        return `"${str.replace(/"/g, '""')}"`
+      }
+      return str
+    }
+    
+    // Build CSV with custom column order
+    const headers = ['Date', 'Crew', 'Program', 'Venue', 'Team', 'Sound Requirements', 'Call Time']
+    const csvRows = [headers.join(',')]
+    
+    // Add data rows
+    results.forEach((row: any) => {
+      // Format date as DD/MM/YYYY (zero-padded)
+      // Google Sheets will display this as plain text without converting to serial numbers
+      let formattedDate = row.Date
+      if (row.Date) {
+        const dateMatch = row.Date.match(/^(\d{4})-(\d{2})-(\d{2})/)
+        if (dateMatch) {
+          const [, year, month, day] = dateMatch
+          // Simple DD/MM/YYYY format (e.g., 02/12/2025)
+          formattedDate = `${day}/${month}/${year}`
+        }
+      }
+      
+      const values = [
+        escapeCSV(formattedDate), // Escape for CSV safety
+        escapeCSV(row.Crew),
+        escapeCSV(row.Program),
+        escapeCSV(row.Venue),
+        escapeCSV(row.Team),
+        escapeCSV(row['Sound Requirements']),
+        escapeCSV(row['Call Time'])
+      ]
+      csvRows.push(values.join(','))
+    })
+    
+    const csv = csvRows.join('\n')
+    
+    return new Response(csv, {
+      headers: {
+        'Content-Type': 'text/csv; charset=utf-8',
+        'Content-Disposition': `inline; filename="ncpa-events-${month}.csv"`,
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Access-Control-Allow-Origin': '*'
+      }
+    })
+  } catch (error: any) {
+    return c.json({ success: false, error: error.message }, 500)
+  }
+})
+
+// ============================================
+// V4.1 ENHANCED API ENDPOINTS (Must be before /:id catch-all route)
+// ============================================
+setupFilteringEndpoints(app)
+setupConflictDetection(app)
+setupBulkAssignment(app)
+setupDashboardEndpoints(app)
+setupExportEndpoints(app)
+setupCrewAssignmentEngine(app)
+setupAuthEndpoints(app)
+setupCrewStatsEndpoints(app)
+
+// Get single event (This must be AFTER specific routes like /filter-options)
+app.get('/api/events/:id', async (c) => {
+  try {
+    const id = c.req.param('id')
+    const result = await c.env.DB.prepare(`
+      SELECT * FROM events WHERE id = ?
+    `).bind(id).first()
+    
+    if (!result) {
+      return c.json({ success: false, error: 'Event not found' }, 404)
+    }
+    
+    return c.json({ success: true, data: result })
+  } catch (error: any) {
+    return c.json({ success: false, error: error.message }, 500)
+  }
+})
+
+// Create new event
+app.post('/api/events', async (c) => {
+  try {
+    const body = await c.req.json()
+    const { event_date, program, venue, team, sound_requirements, call_time, crew } = body
+    
+    if (!event_date || !program || !venue) {
+      return c.json({ success: false, error: 'Date, program, and venue are required' }, 400)
+    }
+    
+    // Check if sound_requirements is filled
+    const requirements_updated = sound_requirements && sound_requirements.trim() !== '' ? 1 : 0
+    
+    const result = await c.env.DB.prepare(`
+      INSERT INTO events (event_date, program, venue, team, sound_requirements, call_time, crew, requirements_updated)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).bind(
+      event_date,
+      program,
+      venue,
+      team || null,
+      sound_requirements || null,
+      call_time || null,
+      crew || null,
+      requirements_updated
+    ).run()
+    
+    const eventId = result.meta.last_row_id
+    
+    // Generate embedding for semantic search (Version 4.0)
+    try {
+      if (c.env.AI && c.env.VECTORIZE) {
+        const event = { id: eventId, event_date, program, venue, team, sound_requirements, call_time, crew, created_at: new Date().toISOString() }
+        const { text, vector, metadata } = await generateEventEmbedding(event, c.env.AI)
+        
+        // Store in Vectorize
+        await c.env.VECTORIZE.insert([{
+          id: `event-${eventId}`,
+          values: vector,
+          metadata
+        }])
+        
+        // Store embedding metadata in DB
+        await c.env.DB.prepare(`
+          INSERT INTO event_embeddings (event_id, embedding_text, metadata_json, vector_id)
+          VALUES (?, ?, ?, ?)
+        `).bind(eventId, text, JSON.stringify(metadata), `event-${eventId}`).run()
+        
+        // Update event with embedding_id
+        await c.env.DB.prepare(`
+          UPDATE events SET embedding_id = ? WHERE id = ?
+        `).bind(`event-${eventId}`, eventId).run()
+        
+        console.log(`✅ Generated embedding for event ${eventId}`)
+      }
+    } catch (embError) {
+      console.warn('⚠️ Embedding generation failed (non-critical):', embError)
+    }
+    
+    return c.json({ 
+      success: true, 
+      data: { 
+        id: eventId,
+        event_date,
+        program,
+        venue,
+        team,
+        sound_requirements,
+        call_time,
+        crew,
+        requirements_updated
+      }
+    }, 201)
+  } catch (error: any) {
+    return c.json({ success: false, error: error.message }, 500)
+  }
+})
+
+// Update event
 app.put('/api/events/:id', async (c) => {
   try {
     const id = c.req.param('id')
-    const event = await c.req.json()
-    await c.env.DB.prepare(
-      `UPDATE events SET event_date=?, program=?, venue=?, team=?, sound_requirements=?, 
-       call_time=?, crew=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`
-    ).bind(
-      event.event_date, event.program, event.venue, event.team,
-      event.sound_requirements, event.call_time, event.crew, id
+    const body = await c.req.json()
+    const { event_date, program, venue, team, sound_requirements, call_time, crew } = body
+    
+    // Check if sound_requirements is filled
+    const requirements_updated = sound_requirements && sound_requirements.trim() !== '' ? 1 : 0
+    
+    await c.env.DB.prepare(`
+      UPDATE events 
+      SET event_date = ?,
+          program = ?,
+          venue = ?,
+          team = ?,
+          sound_requirements = ?,
+          call_time = ?,
+          crew = ?,
+          requirements_updated = ?,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).bind(
+      event_date,
+      program,
+      venue,
+      team || null,
+      sound_requirements || null,
+      call_time || null,
+      crew || null,
+      requirements_updated,
+      id
     ).run()
-    return c.json({ success: true })
+    
+    return c.json({ success: true, message: 'Event updated successfully' })
   } catch (error: any) {
     return c.json({ success: false, error: error.message }, 500)
   }
 })
 
+// Delete event
 app.delete('/api/events/:id', async (c) => {
   try {
     const id = c.req.param('id')
-    await c.env.DB.prepare('DELETE FROM events WHERE id=?').bind(id).run()
-    return c.json({ success: true })
+    
+    await c.env.DB.prepare(`
+      DELETE FROM events WHERE id = ?
+    `).bind(id).run()
+    
+    return c.json({ success: true, message: 'Event deleted successfully' })
   } catch (error: any) {
     return c.json({ success: false, error: error.message }, 500)
   }
 })
 
-// Bulk update crew assignments
-app.post('/api/events/bulk-update-crew', async (c) => {
+// Bulk delete events by date range
+app.post('/api/events/bulk-delete', async (c) => {
   try {
-    const { updates } = await c.req.json() // [{ id, crew }]
-    const stmt = c.env.DB.prepare('UPDATE events SET crew=?, updated_at=CURRENT_TIMESTAMP WHERE id=?')
-    const batch = updates.map((u: any) => stmt.bind(u.crew, u.id))
-    await c.env.DB.batch(batch)
-    return c.json({ success: true, updated: updates.length })
-  } catch (error: any) {
-    return c.json({ success: false, error: error.message }, 500)
-  }
-})
-
-// ============================================
-// CREW API (Crew Assignment Module)
-// ============================================
-app.get('/api/crew', async (c) => {
-  try {
-    const { results } = await c.env.DB.prepare('SELECT * FROM crew ORDER BY level, name').all()
-    return c.json({ success: true, data: results })
-  } catch (error: any) {
-    return c.json({ success: false, error: error.message }, 500)
-  }
-})
-
-app.get('/api/crew/unavailability', async (c) => {
-  try {
-    const month = c.req.query('month')
-    let query = 'SELECT cu.*, c.name as crew_name FROM crew_unavailability cu JOIN crew c ON cu.crew_id = c.id'
-    if (month) {
-      query += ` WHERE strftime('%Y-%m', cu.unavailable_date) = '${month}'`
+    const body = await c.req.json()
+    const { month, year } = body
+    
+    if (!month || !year) {
+      return c.json({ success: false, error: 'Month and year are required' }, 400)
     }
-    const { results } = await c.env.DB.prepare(query).all()
-    return c.json({ success: true, data: results })
-  } catch (error: any) {
-    return c.json({ success: false, error: error.message }, 500)
-  }
-})
-
-app.post('/api/crew/unavailability', async (c) => {
-  try {
-    const { crew_id, unavailable_date, reason } = await c.req.json()
-    await c.env.DB.prepare(
-      'INSERT OR REPLACE INTO crew_unavailability (crew_id, unavailable_date, reason) VALUES (?, ?, ?)'
-    ).bind(crew_id, unavailable_date, reason || '').run()
-    return c.json({ success: true })
-  } catch (error: any) {
-    return c.json({ success: false, error: error.message }, 500)
-  }
-})
-
-app.delete('/api/crew/unavailability/:crew_id/:date', async (c) => {
-  try {
-    const crew_id = c.req.param('crew_id')
-    const date = c.req.param('date')
-    await c.env.DB.prepare(
-      'DELETE FROM crew_unavailability WHERE crew_id=? AND unavailable_date=?'
-    ).bind(crew_id, date).run()
-    return c.json({ success: true })
-  } catch (error: any) {
-    return c.json({ success: false, error: error.message }, 500)
-  }
-})
-
-// ============================================
-// ASSIGNMENT ENGINE
-// ============================================
-const VENUE_MAP: Record<string, string> = {
-  'JBT': 'JBT', 'Jamshed Bhabha Theatre': 'JBT',
-  'TT': 'Tata', 'Tata Theatre': 'Tata', 'TATA': 'Tata', 'Tata': 'Tata',
-  'TET': 'Experimental', 'Experimental Theatre': 'Experimental', 'Experimental': 'Experimental',
-  'GDT': 'Godrej Dance', 'Godrej Dance Theatre': 'Godrej Dance',
-  'LT': 'Little Theatre', 'Little Theatre': 'Little Theatre',
-}
-
-const TEAM_TO_VERTICAL: Record<string, string> = {
-  'Dr.Swapno/Team': 'Dance', 'Dr.Rao/Team': 'Indian Music',
-  'Farrahnaz & Team': 'Intl Music', 'Nooshin/Team': 'Theatre',
-  'Bruce/Team': 'Theatre', 'Dr.Sujata/Team': 'Library',
-  'Bianca/Team': 'Western Music', 'Marketing': 'Corporate',
-}
-
-function normalizeVenue(venue: string): string {
-  for (const [key, val] of Object.entries(VENUE_MAP)) {
-    if (venue.toLowerCase().includes(key.toLowerCase())) return val
-  }
-  return 'Others'
-}
-
-function getVertical(team: string): string {
-  for (const [key, val] of Object.entries(TEAM_TO_VERTICAL)) {
-    if (team.toLowerCase().includes(key.toLowerCase())) return val
-  }
-  return 'Others'
-}
-
-app.post('/api/assignments/auto-assign', async (c) => {
-  try {
-    const { month } = await c.req.json() // YYYY-MM
     
-    // Get events for month
-    const { results: events } = await c.env.DB.prepare(
-      "SELECT * FROM events WHERE strftime('%Y-%m', event_date) = ? ORDER BY event_date"
-    ).bind(month).all()
+    // Calculate date range for the month
+    const startDate = `${year}-${String(month).padStart(2, '0')}-01`
+    const lastDay = new Date(year, month, 0).getDate() // Last day of month
+    const endDate = `${year}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`
     
-    // Get all crew
-    const { results: crewList } = await c.env.DB.prepare('SELECT * FROM crew').all()
+    // Count events first
+    const countResult = await c.env.DB.prepare(`
+      SELECT COUNT(*) as count FROM events 
+      WHERE event_date >= ? AND event_date <= ?
+    `).bind(startDate, endDate).first()
     
-    // Get unavailability
-    const { results: unavailable } = await c.env.DB.prepare(
-      "SELECT * FROM crew_unavailability WHERE strftime('%Y-%m', unavailable_date) = ?"
-    ).bind(month).all()
+    const count = countResult?.count || 0
     
-    const unavailMap = new Map<string, Set<number>>()
-    unavailable.forEach((u: any) => {
-      if (!unavailMap.has(u.unavailable_date)) unavailMap.set(u.unavailable_date, new Set())
-      unavailMap.get(u.unavailable_date)!.add(u.crew_id)
+    if (count === 0) {
+      return c.json({ success: true, deleted: 0, message: 'No events found for this month' })
+    }
+    
+    // Delete events
+    await c.env.DB.prepare(`
+      DELETE FROM events 
+      WHERE event_date >= ? AND event_date <= ?
+    `).bind(startDate, endDate).run()
+    
+    return c.json({ 
+      success: true, 
+      deleted: count,
+      message: `Deleted ${count} events from ${startDate} to ${endDate}` 
     })
+  } catch (error: any) {
+    return c.json({ success: false, error: error.message }, 500)
+  }
+})
+
+// Bulk upload events (for CSV/Word import with duplicate detection)
+app.post('/api/events/bulk', async (c) => {
+  try {
+    const body = await c.req.json()
+    const { events } = body
     
-    // Workload tracking
-    const workload = new Map<number, number>()
-    crewList.forEach((c: any) => workload.set(c.id, 0))
+    if (!Array.isArray(events) || events.length === 0) {
+      return c.json({ success: false, error: 'Events array is required' }, 400)
+    }
     
-    const assignments: any[] = []
+    // Track results and skipped duplicates
+    const inserted = []
+    const skipped = []
+    const invalid = []
     
-    for (const event of events as any[]) {
-      const venueNorm = normalizeVenue(event.venue)
-      const vertical = getVertical(event.team || '')
-      const unavailableCrewIds = unavailMap.get(event.event_date) || new Set()
+    for (const event of events) {
+      const { event_date, program, venue, team, sound_requirements, call_time, crew } = event
       
-      // Filter available crew
-      const available = (crewList as any[]).filter(crew => {
-        if (unavailableCrewIds.has(crew.id)) return false
-        if (crew.is_outside_crew) return false // OC for stage only
-        
-        const venuesCaps = JSON.parse(crew.venue_capabilities)
-        const vertCaps = JSON.parse(crew.vertical_capabilities)
-        
-        if (venuesCaps[venueNorm] === 'N') return false
-        if (vertCaps[vertical] === 'N') return false
-        
-        return true
-      })
+      // Validate required fields
+      if (!event_date || !program || !venue) {
+        invalid.push({ ...event, reason: 'Missing required fields (date, program, or venue)' })
+        continue
+      }
       
-      // Sort by: preferred (*), then level, then workload
-      available.sort((a, b) => {
-        const aVenue = JSON.parse(a.venue_capabilities)[venueNorm]
-        const bVenue = JSON.parse(b.venue_capabilities)[venueNorm]
-        const aVert = JSON.parse(a.vertical_capabilities)[vertical]
-        const bVert = JSON.parse(b.vertical_capabilities)[vertical]
-        
-        const aPreferred = (aVenue === 'Y*' || aVert === 'Y*') ? 1 : 0
-        const bPreferred = (bVenue === 'Y*' || bVert === 'Y*') ? 1 : 0
-        if (bPreferred !== aPreferred) return bPreferred - aPreferred
-        
-        const levels = { 'Senior': 0, 'Mid': 1, 'Junior': 2, 'Hired': 3 }
-        if (levels[a.level as keyof typeof levels] !== levels[b.level as keyof typeof levels]) {
-          return levels[a.level as keyof typeof levels] - levels[b.level as keyof typeof levels]
-        }
-        
-        return (workload.get(a.id) || 0) - (workload.get(b.id) || 0)
-      })
+      // Check for duplicate: same date + program + venue
+      // This prevents re-importing events that already exist (from manual entry or previous imports)
+      const existing = await c.env.DB.prepare(`
+        SELECT id FROM events 
+        WHERE event_date = ? AND program = ? AND venue = ?
+        LIMIT 1
+      `).bind(event_date, program, venue).first()
       
-      // Assign FOH (first available)
-      if (available.length > 0) {
-        const foh = available[0]
-        assignments.push({
-          event_id: event.id,
-          crew_id: foh.id,
-          crew_name: foh.name,
-          role: 'FOH',
-          event_date: event.event_date,
-          program: event.program,
-          venue: event.venue
+      if (existing) {
+        // Duplicate found - skip insertion to preserve existing data
+        skipped.push({ 
+          ...event, 
+          reason: 'Duplicate event already exists',
+          existing_id: existing.id 
         })
-        workload.set(foh.id, (workload.get(foh.id) || 0) + 1)
+        continue
       }
       
-      // Assign Stage if needed (venue requires it)
-      if (['JBT', 'Tata', 'Experimental'].includes(venueNorm) && available.length > 1) {
-        const stage = available.find(c => c.can_stage && c !== available[0]) || available[1]
-        if (stage) {
-          assignments.push({
-            event_id: event.id,
-            crew_id: stage.id,
-            crew_name: stage.name,
-            role: 'Stage',
-            event_date: event.event_date,
-            program: event.program,
-            venue: event.venue
-          })
-          workload.set(stage.id, (workload.get(stage.id) || 0) + 1)
-        }
+      // Not a duplicate - insert new event
+      const requirements_updated = sound_requirements && sound_requirements.trim() !== '' ? 1 : 0
+      
+      const result = await c.env.DB.prepare(`
+        INSERT INTO events (event_date, program, venue, team, sound_requirements, call_time, crew, requirements_updated)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).bind(
+        event_date,
+        program,
+        venue,
+        team || null,
+        sound_requirements || null,
+        call_time || null,
+        crew || null,
+        requirements_updated
+      ).run()
+      
+      inserted.push({ id: result.meta.last_row_id, ...event })
+    }
+    
+    // Build detailed response message
+    let message = `${inserted.length} events uploaded successfully`
+    if (skipped.length > 0) {
+      message += `, ${skipped.length} duplicates skipped`
+    }
+    if (invalid.length > 0) {
+      message += `, ${invalid.length} invalid entries ignored`
+    }
+    
+    return c.json({ 
+      success: true, 
+      message,
+      data: inserted,
+      skipped: skipped.length > 0 ? skipped : undefined,
+      invalid: invalid.length > 0 ? invalid : undefined,
+      stats: {
+        total_processed: events.length,
+        inserted: inserted.length,
+        skipped: skipped.length,
+        invalid: invalid.length
+      }
+    }, 201)
+  } catch (error: any) {
+    return c.json({ success: false, error: error.message }, 500)
+  }
+})
+
+// Analytics endpoint for AI queries
+app.get('/api/analytics/stats', async (c) => {
+  try {
+    // Get date range from query (default to last 6 months)
+    const endDate = new Date().toISOString().split('T')[0]
+    const startDate = new Date(Date.now() - 180 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
+    
+    const start = c.req.query('start') || startDate
+    const end = c.req.query('end') || endDate
+    
+    // Total events count
+    const totalResult = await c.env.DB.prepare(`
+      SELECT COUNT(*) as total FROM events
+      WHERE event_date >= ? AND event_date <= ?
+    `).bind(start, end).first()
+    
+    // Events by venue
+    const venueStats = await c.env.DB.prepare(`
+      SELECT venue, COUNT(*) as count 
+      FROM events
+      WHERE event_date >= ? AND event_date <= ?
+      GROUP BY venue
+      ORDER BY count DESC
+    `).bind(start, end).all()
+    
+    // Events by crew
+    const crewStats = await c.env.DB.prepare(`
+      SELECT crew, COUNT(*) as count 
+      FROM events
+      WHERE crew IS NOT NULL AND crew != '' AND event_date >= ? AND event_date <= ?
+      GROUP BY crew
+      ORDER BY count DESC
+    `).bind(start, end).all()
+    
+    return c.json({ 
+      success: true, 
+      data: {
+        total: totalResult?.total || 0,
+        venueStats: venueStats.results || [],
+        crewStats: crewStats.results || []
+      }
+    })
+  } catch (error: any) {
+    return c.json({ success: false, error: error.message }, 500)
+  }
+})
+
+// ============================================
+// INTENT CLASSIFIER - Analyzes query intent
+// ============================================
+function classifyIntent(query: string, pastContext: any[]) {
+  const lowerQuery = query.toLowerCase()
+  
+  // Extract learned preferences from past context
+  const learnedPreferences: any[] = []
+  pastContext.forEach(ctx => {
+    if (ctx.context_data) {
+      try {
+        const data = JSON.parse(ctx.context_data)
+        if (data.venues) learnedPreferences.push({ type: 'venue_preference', value: data.venues })
+        if (data.time) learnedPreferences.push({ type: 'time_preference', value: data.time })
+      } catch (e) {
+        // Ignore parse errors
       }
     }
-    
-    return c.json({ success: true, assignments, workload: Object.fromEntries(workload) })
-  } catch (error: any) {
-    return c.json({ success: false, error: error.message }, 500)
+  })
+  
+  // Detect venues mentioned
+  const venues = {
+    jbt: lowerQuery.includes('jbt') || lowerQuery.includes('jamshed') || lowerQuery.includes('bhabha'),
+    tata: lowerQuery.includes('tata') || lowerQuery.includes('tt '),
+    tet: lowerQuery.includes('tet') || lowerQuery.includes('experimental'),
+    all: lowerQuery.includes('all venues') || lowerQuery.includes('no events')
   }
-})
-
-// Push assignments to calendar (update events table)
-app.post('/api/assignments/push-to-calendar', async (c) => {
-  try {
-    const { assignments } = await c.req.json()
+  
+  // Detect intent type
+  const intentTypes = {
+    availability: lowerQuery.includes('free') || lowerQuery.includes('available') || 
+                  lowerQuery.includes('maintenance') || lowerQuery.includes('schedule'),
+    workshop: lowerQuery.includes('workshop') || lowerQuery.includes('training'),
+    eventQuery: lowerQuery.includes('show') || lowerQuery.includes('event') || 
+                lowerQuery.includes('program') || lowerQuery.includes('performance'),
+    crewQuery: lowerQuery.includes('crew') && !lowerQuery.includes('workshop'),
+    dateQuery: lowerQuery.includes('when') || lowerQuery.includes('which date') || 
+               lowerQuery.includes('what day')
+  }
+  
+  // Determine if clarification is needed
+  let needsClarification = false
+  let clarificationMessage = ''
+  let suggestedQueries: string[] = []
+  let intentType = 'general'
+  
+  // Case 1: Workshop/availability query without specific venue
+  if ((intentTypes.workshop || intentTypes.availability) && !venues.jbt && !venues.tata && !venues.tet && !venues.all) {
+    // Check if we have learned preferences
+    const venuePreference = learnedPreferences.find(p => p.type === 'venue_preference')
     
-    // Group by event_id
-    const byEvent = new Map<number, string[]>()
-    for (const a of assignments) {
-      if (!byEvent.has(a.event_id)) byEvent.set(a.event_id, [])
-      byEvent.get(a.event_id)!.push(`${a.crew_name} (${a.role})`)
+    if (venuePreference) {
+      // Apply learned preference
+      console.log('Applying learned venue preference:', venuePreference.value)
+      venues.jbt = venuePreference.value.includes('JBT')
+      venues.tata = venuePreference.value.includes('Tata')
+      venues.tet = venuePreference.value.includes('TET')
+      intentType = 'availability_with_learned_preference'
+    } else {
+      needsClarification = true
+      intentType = 'ambiguous_availability'
+      clarificationMessage = "I'd be happy to help you find dates! Could you clarify:\n\n1. Which venue(s) do you need? (JBT, Tata Theatre, Experimental Theatre, or all venues?)\n2. Do you need the entire venue free, or just no events scheduled?\n3. Any specific time requirements (morning, afternoon, evening)?\n\nI'll remember your preference for next time!"
+      suggestedQueries = [
+        'When are JBT and Tata both free in November?',
+        'Days with no events in any venue in November',
+        'When is Experimental Theatre available in November?'
+      ]
     }
-    
-    // Update events
-    const updates: any[] = []
-    for (const [eventId, crewList] of byEvent) {
-      const crewStr = crewList.join(', ')
-      updates.push({ id: eventId, crew: crewStr })
-    }
-    
-    const stmt = c.env.DB.prepare('UPDATE events SET crew=?, updated_at=CURRENT_TIMESTAMP WHERE id=?')
-    const batch = updates.map(u => stmt.bind(u.crew, u.id))
-    await c.env.DB.batch(batch)
-    
-    return c.json({ success: true, updated: updates.length })
-  } catch (error: any) {
-    return c.json({ success: false, error: error.message }, 500)
   }
-})
-
-// ============================================
-// EQUIPMENT API (Quote Builder Module)
-// ============================================
-app.get('/api/equipment', async (c) => {
-  try {
-    const { results } = await c.env.DB.prepare('SELECT * FROM equipment ORDER BY name').all()
-    return c.json({ success: true, data: results })
-  } catch (error: any) {
-    return c.json({ success: false, error: error.message }, 500)
+  // Case 2: Multi-venue availability
+  else if ((venues.jbt && venues.tata) || (venues.jbt && venues.tet) || (venues.tata && venues.tet)) {
+    intentType = 'multi_venue_availability'
   }
-})
-
-app.get('/api/equipment/search', async (c) => {
-  try {
-    const q = c.req.query('q')
-    if (!q) return c.json({ success: true, data: [] })
-    
-    const { results } = await c.env.DB.prepare(
-      'SELECT * FROM equipment WHERE name LIKE ? ORDER BY name LIMIT 10'
-    ).bind(`%${q}%`).all()
-    return c.json({ success: true, data: results })
-  } catch (error: any) {
-    return c.json({ success: false, error: error.message }, 500)
+  // Case 3: All venues free (no events at all)
+  else if (venues.all || (lowerQuery.includes('no events') && lowerQuery.includes('day'))) {
+    intentType = 'all_venues_free'
   }
-})
-
-app.post('/api/equipment', async (c) => {
-  try {
-    const { name, rate } = await c.req.json()
-    const { results } = await c.env.DB.prepare(
-      'INSERT INTO equipment (name, rate) VALUES (?, ?) RETURNING *'
-    ).bind(name, rate).all()
-    return c.json({ success: true, data: results[0] })
-  } catch (error: any) {
-    return c.json({ success: false, error: error.message }, 500)
+  // Case 4: Single venue availability
+  else if (venues.jbt || venues.tata || venues.tet) {
+    intentType = 'single_venue_availability'
   }
-})
-
-app.put('/api/equipment/:id', async (c) => {
-  try {
-    const id = c.req.param('id')
-    const { name, rate } = await c.req.json()
-    await c.env.DB.prepare(
-      'UPDATE equipment SET name=?, rate=?, updated_at=CURRENT_TIMESTAMP WHERE id=?'
-    ).bind(name, rate, id).run()
-    return c.json({ success: true })
-  } catch (error: any) {
-    return c.json({ success: false, error: error.message }, 500)
+  // Case 5: Event query
+  else if (intentTypes.eventQuery) {
+    intentType = 'event_search'
   }
-})
-
-app.delete('/api/equipment/:id', async (c) => {
-  try {
-    const id = c.req.param('id')
-    await c.env.DB.prepare('DELETE FROM equipment WHERE id=?').bind(id).run()
-    return c.json({ success: true })
-  } catch (error: any) {
-    return c.json({ success: false, error: error.message }, 500)
+  // Case 6: Crew query
+  else if (intentTypes.crewQuery) {
+    intentType = 'crew_search'
   }
-})
-
-// ============================================
-// WORD DOCUMENT PARSING API
-// ============================================
-
-// Helper to extract text from DOCX XML
-function extractTextFromDocxXml(xmlContent: string): string {
-  const textParts: string[] = []
-  // Simple regex to extract text between XML tags
-  const regex = /<w:t[^>]*>([^<]*)<\/w:t>/g
-  let match
-  while ((match = regex.exec(xmlContent)) !== null) {
-    if (match[1]) textParts.push(match[1])
+  
+  return {
+    type: intentType,
+    needsClarification,
+    clarificationMessage,
+    suggestedQueries,
+    context: {
+      venues,
+      intentTypes,
+      query: query
+    },
+    learnedPreferences
   }
-  return textParts.join(' ')
 }
 
-// Parse Word document and extract equipment data using Anthropic AI
-app.post('/api/equipment/parse-docx', async (c) => {
+// ============================================
+// RAG QUERY ENDPOINT (Version 4.0 - Claude Sonnet 4 + Vectorize)
+// ============================================
+app.post('/api/ai/rag', handleRAGQuery)
+
+// ============================================
+// EMBEDDING BACKFILL ENDPOINT (Admin Only)
+// ============================================
+app.post('/api/admin/backfill-embeddings', async (c) => {
   try {
-    const { documentContent, useAI } = await c.req.json()
+    const { batch_size } = await c.req.json().catch(() => ({ batch_size: 50 }))
     
-    if (!documentContent) {
-      return c.json({ success: false, error: 'No document content provided' }, 400)
+    const result = await backfillEmbeddings(c, batch_size || 50)
+    
+    return c.json(result)
+  } catch (error: any) {
+    return c.json({
+      success: false,
+      error: 'Backfill failed',
+      details: error.message
+    }, 500)
+  }
+})
+
+// AI Query endpoint - Intelligent data analysis with Claude (Legacy)
+app.post('/api/ai/query', async (c) => {
+  try {
+    const body = await c.req.json()
+    const { query, session_id } = body
+    
+    if (!query) {
+      return c.json({ success: false, error: 'Query is required' }, 400)
     }
     
-    // First, try to parse without AI (basic extraction)
-    const extractedText = documentContent
+    // Generate session ID if not provided
+    const sessionId = session_id || `session_${Date.now()}_${Math.random().toString(36).substring(7)}`
     
-    // Try basic parsing (looking for patterns like "ITEM NAME" followed by a number)
-    const lines = extractedText.split(/[\n\r]+/).filter((l: string) => l.trim())
-    const basicParsedItems: { name: string, rate: number }[] = []
+    // Get relevant events from the database
+    const threeMonthsAgo = new Date()
+    threeMonthsAgo.setMonth(threeMonthsAgo.getMonth() - 3)
+    const sixMonthsAhead = new Date()
+    sixMonthsAhead.setMonth(sixMonthsAhead.getMonth() + 6)
     
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i].trim()
-      // Skip headers
-      if (line.match(/^(S\.?No|ITEM|RATE|Rs\.?)/i)) continue
+    const allEvents = await c.env.DB.prepare(`
+      SELECT event_date, program, venue, crew, team 
+      FROM events 
+      WHERE event_date >= ? AND event_date <= ?
+      ORDER BY event_date ASC
+    `).bind(
+      threeMonthsAgo.toISOString().split('T')[0],
+      sixMonthsAhead.toISOString().split('T')[0]
+    ).all()
+    
+    // ============================================
+    // INTENT CLASSIFIER - Determines query intent
+    // ============================================
+    const lowerQuery = query.toLowerCase()
+    
+    // Check context memory for similar past queries
+    const pastContext = await c.env.DB.prepare(`
+      SELECT intent, context_data, resolved 
+      FROM query_context 
+      WHERE session_id = ? AND resolved = 1 
+      ORDER BY created_at DESC 
+      LIMIT 5
+    `).bind(sessionId).all()
+    
+    // Intent classification
+    const intent = classifyIntent(lowerQuery, pastContext.results)
+    
+    // Store query context
+    await c.env.DB.prepare(`
+      INSERT INTO query_context (session_id, query_text, intent, context_data, resolved)
+      VALUES (?, ?, ?, ?, 0)
+    `).bind(
+      sessionId,
+      query,
+      intent.type,
+      JSON.stringify(intent.context)
+    ).run()
+    
+    // Handle ambiguous queries using intent classification
+    if (intent.needsClarification) {
+      // Store clarification request
+      await c.env.DB.prepare(`
+        UPDATE query_context 
+        SET context_data = ? 
+        WHERE session_id = ? AND query_text = ?
+      `).bind(
+        JSON.stringify({ ...intent.context, clarification_requested: true }),
+        sessionId,
+        query
+      ).run()
       
-      // Try to match "NAME" followed by "RATE" pattern
-      const nameRateMatch = line.match(/^(.+?)\s+(\d{2,5})$/)
-      if (nameRateMatch) {
-        const name = nameRateMatch[1].trim().toUpperCase()
-        const rate = parseInt(nameRateMatch[2])
-        if (name && rate && rate >= 100 && rate <= 50000) {
-          basicParsedItems.push({ name, rate })
-        }
-      }
-    }
-    
-    // If we found items without AI, return them
-    if (basicParsedItems.length > 0 && !useAI) {
-      return c.json({ 
-        success: true, 
-        items: basicParsedItems, 
-        method: 'basic',
-        message: `Found ${basicParsedItems.length} equipment items using basic parsing`
+      return c.json({
+        success: true,
+        query: query,
+        session_id: sessionId,
+        data: [],
+        clarification_needed: true,
+        question: intent.clarificationMessage,
+        intent: intent.type,
+        suggested_queries: intent.suggestedQueries,
+        method: 'Clarification Request'
       })
     }
     
-    // If useAI is requested, use Anthropic API
-    if (useAI) {
-      // Get the Anthropic API key from database
-      const settings = await c.env.DB.prepare(
-        'SELECT anthropic_api_key, api_key_iv, password_hash, password_salt FROM app_settings WHERE id = 1'
-      ).first() as any
+    // If we have context from learning, apply it
+    if (intent.learnedPreferences && intent.learnedPreferences.length > 0) {
+      console.log('Applying learned preferences:', intent.learnedPreferences)
+    }
+    
+    // Smart detection: Handle "both venues free" or "JBT and Tata" queries directly in code
+    // Also apply learned venue preferences
+    let hasJBT = lowerQuery.includes('jbt') || lowerQuery.includes('jamshed') || lowerQuery.includes('bhabha')
+    let hasTata = lowerQuery.includes('tata')
+    let hasAvailability = lowerQuery.includes('free') || lowerQuery.includes('available') || lowerQuery.includes('maintenance') || lowerQuery.includes('schedule') || lowerQuery.includes('workshop')
+    
+    // Apply learned preferences if available
+    if (intent.type === 'availability_with_learned_preference' && intent.context.venues) {
+      hasJBT = intent.context.venues.jbt
+      hasTata = intent.context.venues.tata
+      hasAvailability = true  // Force availability check when using learned preferences
+      console.log('Applied learned venue preferences: JBT=', hasJBT, 'Tata=', hasTata)
+    }
+    
+    const isBothFreeQuery = hasJBT && hasTata && hasAvailability
+    
+    if (isBothFreeQuery) {
+      // Extract month from query (default to current month if not specified)
+      const monthMatch = query.match(/november|december|january|february|march|april|may|june|july|august|september|october/i)
+      const targetMonth = monthMatch ? monthMatch[0].toLowerCase() : null
       
-      if (!settings || !settings.anthropic_api_key || !settings.api_key_iv) {
-        return c.json({ 
-          success: false, 
-          error: 'No Anthropic API key configured. Please add your API key in Settings to enable AI-powered Word parsing.',
-          requiresApiKey: true
-        }, 400)
+      // Generate all dates in target month
+      const today = new Date()
+      let year = today.getFullYear()
+      const monthNames = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december']
+      const monthIndex = targetMonth ? monthNames.indexOf(targetMonth) : today.getMonth()
+      
+      // If target month is in the past, use next year
+      if (monthIndex < today.getMonth()) {
+        year++
       }
       
-      // For AI parsing, we need the user's password to decrypt the API key
-      // This is handled client-side where user provides password for AI parsing
-      const { password } = await c.req.json()
-      
-      if (!password) {
-        return c.json({ 
-          success: false, 
-          error: 'Password required for AI parsing',
-          requiresPassword: true
-        }, 400)
+      const daysInMonth = new Date(year, monthIndex + 1, 0).getDate()
+      const allDatesInMonth = []
+      for (let day = 1; day <= daysInMonth; day++) {
+        const date = new Date(year, monthIndex, day)
+        allDatesInMonth.push(date.toISOString().split('T')[0])
       }
       
-      // Verify password
-      const passwordValid = await verifyPassword(password, settings.password_hash, settings.password_salt)
-      if (!passwordValid) {
-        return c.json({ success: false, error: 'Invalid password' }, 401)
+      // Filter events for JBT and Tata in that month
+      // Note: Venue formats can be "JBT", "JBT 5pm", "Jamshed Bhabha Theatre", etc.
+      const monthPrefix = `${year}-${String(monthIndex + 1).padStart(2, '0')}`
+      
+      const jbtEvents = allEvents.results.filter((e: any) => {
+        const venue = e.venue?.toLowerCase() || ''
+        const dateMatches = e.event_date.startsWith(monthPrefix)
+        // Match: "JBT", "JBT 5pm", "Jamshed Bhabha", etc.
+        // But NOT: "TET & JBT Museum" (that's TET, not JBT)
+        const isJBT = (venue.startsWith('jbt') || venue.includes('jamshed') || venue.includes('bhabha')) &&
+                      !venue.startsWith('tet')
+        return isJBT && dateMatches
+      })
+      
+      const tataEvents = allEvents.results.filter((e: any) => {
+        const venue = e.venue?.toLowerCase() || ''
+        const dateMatches = e.event_date.startsWith(monthPrefix)
+        // Match: "TT", "TT 6pm", "Tata Theatre", etc.
+        const isTata = venue.startsWith('tt') || venue.includes('tata theatre')
+        return isTata && dateMatches
+      })
+      
+      // Find dates where both are free
+      const jbtDates = new Set(jbtEvents.map((e: any) => e.event_date))
+      const tataDates = new Set(tataEvents.map((e: any) => e.event_date))
+      
+      const freeDates = allDatesInMonth
+        .filter(date => !jbtDates.has(date) && !tataDates.has(date))
+        .map(date => ({
+          event_date: date,
+          program: 'Both venues free for maintenance',
+          venue: 'JBT & Tata Theatre',
+          crew: '',
+          team: ''
+        }))
+      
+      // Mark query as resolved and store learned context
+      await c.env.DB.prepare(`
+        UPDATE query_context 
+        SET resolved = 1, context_data = ?
+        WHERE session_id = ? AND query_text = ?
+      `).bind(
+        JSON.stringify({
+          venues: ['JBT', 'Tata'],
+          intent: 'multi_venue_availability',
+          successful: true,
+          result_count: freeDates.length
+        }),
+        sessionId,
+        query
+      ).run()
+      
+      return c.json({
+        success: true,
+        query: query,
+        session_id: sessionId,
+        data: freeDates,
+        explanation: `Code analysis found ${freeDates.length} dates where both venues are free`,
+        method: 'Smart Code Analysis',
+        learned: true
+      })
+    }
+    
+    // Handle "completely free" or "no events" queries (all venues)
+    const isCompletelyFreeQuery = (lowerQuery.includes('no events') || lowerQuery.includes('completely free') || 
+                                   lowerQuery.includes('all venues') || lowerQuery.includes('no shows')) &&
+                                   (lowerQuery.includes('day') || lowerQuery.includes('date'))
+    
+    if (isCompletelyFreeQuery) {
+      // Extract month from query
+      const monthMatch = query.match(/november|december|january|february|march|april|may|june|july|august|september|october/i)
+      const targetMonth = monthMatch ? monthMatch[0].toLowerCase() : null
+      
+      const today = new Date()
+      let year = today.getFullYear()
+      const monthNames = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december']
+      const monthIndex = targetMonth ? monthNames.indexOf(targetMonth) : today.getMonth()
+      
+      if (monthIndex < today.getMonth()) {
+        year++
       }
       
-      // Decrypt the API key
-      const apiKey = await decryptApiKey(settings.anthropic_api_key, settings.api_key_iv, password)
-      if (!apiKey) {
-        return c.json({ success: false, error: 'Failed to decrypt API key. Please re-enter your API key in Settings.' }, 500)
+      const daysInMonth = new Date(year, monthIndex + 1, 0).getDate()
+      const monthPrefix = `${year}-${String(monthIndex + 1).padStart(2, '0')}`
+      
+      // Get all event dates in the month
+      const eventDates = new Set(
+        allEvents.results
+          .filter((e: any) => e.event_date.startsWith(monthPrefix))
+          .map((e: any) => e.event_date)
+      )
+      
+      // Find dates with no events at all
+      const completelyFreeDates = []
+      for (let day = 1; day <= daysInMonth; day++) {
+        const date = new Date(year, monthIndex, day).toISOString().split('T')[0]
+        if (!eventDates.has(date)) {
+          completelyFreeDates.push({
+            event_date: date,
+            program: 'No events scheduled - Perfect for crew workshop',
+            venue: 'All venues available',
+            crew: '',
+            team: ''
+          })
+        }
       }
       
-      // Call Anthropic API
-      try {
-        const anthropicResponse = await fetch('https://api.anthropic.com/v1/messages', {
+      // Mark query as resolved and store learned context
+      await c.env.DB.prepare(`
+        UPDATE query_context 
+        SET resolved = 1, context_data = ?
+        WHERE session_id = ? AND query_text = ?
+      `).bind(
+        JSON.stringify({
+          venues: ['All'],
+          intent: 'all_venues_free',
+          successful: true,
+          result_count: completelyFreeDates.length
+        }),
+        sessionId,
+        query
+      ).run()
+      
+      return c.json({
+        success: true,
+        query: query,
+        session_id: sessionId,
+        data: completelyFreeDates,
+        explanation: `Found ${completelyFreeDates.length} days with no events scheduled in any venue`,
+        method: 'Smart Code Analysis',
+        learned: true
+      })
+    }
+    
+    // Handle single venue availability queries
+    const hasTET = lowerQuery.includes('tet') || lowerQuery.includes('experimental')
+    const singleVenueQuery = (hasJBT && !hasTata && !hasTET) || 
+                             (!hasJBT && hasTata && !hasTET) || 
+                             (!hasJBT && !hasTata && hasTET)
+    
+    if (singleVenueQuery && hasAvailability) {
+      // Determine which venue
+      let venueName = ''
+      let venueFilter: (venue: string) => boolean
+      
+      if (hasJBT) {
+        venueName = 'JBT'
+        venueFilter = (v: string) => {
+          const lv = v.toLowerCase()
+          return (lv.startsWith('jbt') || lv.includes('jamshed') || lv.includes('bhabha')) && !lv.startsWith('tet')
+        }
+      } else if (hasTata) {
+        venueName = 'Tata Theatre'
+        venueFilter = (v: string) => {
+          const lv = v.toLowerCase()
+          return lv.startsWith('tt') || lv.includes('tata theatre')
+        }
+      } else if (hasTET) {
+        venueName = 'Experimental Theatre'
+        venueFilter = (v: string) => {
+          const lv = v.toLowerCase()
+          return lv.startsWith('tet') || lv.includes('experimental')
+        }
+      } else {
+        // Should not reach here
+        venueFilter = () => false
+      }
+      
+      // Extract month
+      const monthMatch = query.match(/november|december|january|february|march|april|may|june|july|august|september|october/i)
+      const targetMonth = monthMatch ? monthMatch[0].toLowerCase() : null
+      
+      const today = new Date()
+      let year = today.getFullYear()
+      const monthNames = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december']
+      const monthIndex = targetMonth ? monthNames.indexOf(targetMonth) : today.getMonth()
+      
+      if (monthIndex < today.getMonth()) {
+        year++
+      }
+      
+      const daysInMonth = new Date(year, monthIndex + 1, 0).getDate()
+      const monthPrefix = `${year}-${String(monthIndex + 1).padStart(2, '0')}`
+      
+      // Get events for this venue in this month
+      const venueEvents = allEvents.results.filter((e: any) => {
+        const dateMatches = e.event_date.startsWith(monthPrefix)
+        const venueMatches = venueFilter(e.venue || '')
+        return dateMatches && venueMatches
+      })
+      
+      const eventDates = new Set(venueEvents.map((e: any) => e.event_date))
+      
+      // Find free dates
+      const freeDates = []
+      for (let day = 1; day <= daysInMonth; day++) {
+        const date = new Date(year, monthIndex, day).toISOString().split('T')[0]
+        if (!eventDates.has(date)) {
+          freeDates.push({
+            event_date: date,
+            program: `No event scheduled at ${venueName}`,
+            venue: venueName,
+            crew: '',
+            team: ''
+          })
+        }
+      }
+      
+      // Mark as resolved
+      await c.env.DB.prepare(`
+        UPDATE query_context 
+        SET resolved = 1, context_data = ?
+        WHERE session_id = ? AND query_text = ?
+      `).bind(
+        JSON.stringify({
+          venues: [venueName],
+          intent: 'single_venue_availability',
+          successful: true,
+          result_count: freeDates.length
+        }),
+        sessionId,
+        query
+      ).run()
+      
+      return c.json({
+        success: true,
+        query: query,
+        session_id: sessionId,
+        data: freeDates,
+        explanation: `Found ${freeDates.length} free dates for ${venueName} in ${monthNames[monthIndex]}`,
+        method: 'Smart Code Analysis',
+        learned: true
+      })
+    }
+    
+    // For other queries, use AI (with minimal context)
+    const today = new Date()
+    const currentMonth = today.toLocaleString('default', { month: 'long' })
+    const currentYear = today.getFullYear()
+    const apiKey = c.env.ANTHROPIC_API_KEY
+    
+    // Let Claude ANALYZE the data directly, not generate SQL
+    const prompt = `You are an intelligent data analyst for NCPA Sound Crew event management.
+
+CURRENT CONTEXT:
+- Today's date: ${today.toISOString().split('T')[0]}
+- Current month: ${currentMonth} ${currentYear}
+
+COMPLETE EVENT DATABASE (simplified for analysis):
+${allEvents.results.map((e: any) => `${e.event_date}|${e.venue}|${e.program}`).join('\n')}
+
+USER QUESTION: "${query}"
+
+INSTRUCTIONS:
+Analyze the complete event data above and answer the user's question intelligently.
+
+VENUE NAME MATCHING:
+- "Tata" / "Tata Theatre" / "TT" → Match any venue containing "Tata"
+- "JBT" / "Jamshed Bhabha" / "Bhabha" → Match "Jamshed Bhabha Theatre"
+- "Experimental" / "Exp" / "ET" → Match "Experimental Theatre"
+- Be flexible with venue names (case-insensitive, partial matches)
+
+FOR SINGLE VENUE "FREE DATES" QUESTIONS:
+Example: "Which dates no events at Tata?"
+1. List ALL dates in November 2025 (Nov 1-30)
+2. Check which dates have events at Tata Theatre
+3. Return dates that DON'T have Tata events
+4. Format: [{"event_date": "2025-11-03", "program": "No event scheduled", "venue": "Tata Theatre"}]
+
+FOR MULTIPLE VENUE "BOTH FREE" QUESTIONS:
+Example: "Closest date when JBT and Tata both free?"
+1. List ALL dates in November 2025
+2. For each date, check if EITHER venue has an event
+3. Return dates where BOTH venues are free (no JBT event AND no Tata event)
+4. Sort by date (closest first)
+5. Format: [{"event_date": "2025-11-03", "program": "Both venues free for maintenance", "venue": "JBT & Tata Theatre"}]
+
+FOR REGULAR EVENT QUERIES:
+Example: "Show all events at Tata" or "Events tomorrow"
+1. Filter events matching the criteria
+2. Return matching events from database
+3. Format: [{"event_date": "...", "program": "...", "venue": "...", "crew": "..."}]
+
+OUTPUT FORMAT:
+- Return ONLY a valid JSON array, nothing else
+- No markdown, no explanations, no code blocks
+- Just pure JSON: [{"event_date": "...", "program": "...", "venue": "..."}]
+- Include relevant fields: event_date, program, venue (and crew/team if relevant)
+- Sort results by date (earliest first)
+
+EXAMPLES:
+
+Q: "Which dates no events at Tata?"
+A: [{"event_date":"2025-11-01","program":"No event scheduled","venue":"Tata Theatre"},{"event_date":"2025-11-03","program":"No event scheduled","venue":"Tata Theatre"}]
+
+Q: "Closest date JBT and Tata both free?"
+A: [{"event_date":"2025-11-05","program":"Both venues free for maintenance","venue":"JBT & Tata Theatre"}]
+
+Q: "Events tomorrow"
+A: [{"event_date":"2025-11-02","program":"Classical Concert","venue":"Tata Theatre","crew":"Ashwin"}]
+
+NOW ANALYZE AND RESPOND:
+JSON ARRAY:`
+    
+    // Use Cloudflare Workers AI for fast, local processing (no external API)
+    let aiResponse: string
+    
+    try {
+      // Try Cloudflare AI first (built-in, fast, no CPU timeout)
+      if (c.env.AI) {
+        const aiResult = await c.env.AI.run('@cf/meta/llama-3.2-3b-instruct', {
+          prompt: prompt,
+          max_tokens: 1024
+        })
+        aiResponse = aiResult.response || aiResult.text || JSON.stringify(aiResult)
+      } else {
+        // Fallback to Anthropic if AI binding not available
+        const response = await fetch('https://api.anthropic.com/v1/messages', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -1070,284 +1199,105 @@ app.post('/api/equipment/parse-docx', async (c) => {
             'anthropic-version': '2023-06-01'
           },
           body: JSON.stringify({
-            model: 'claude-3-haiku-20240307',
-            max_tokens: 4096,
+            model: 'claude-3-5-haiku-20241022',
+            max_tokens: 2048,
             messages: [{
               role: 'user',
-              content: `Parse this equipment rate chart and extract equipment items with their rates. Return ONLY a valid JSON array with objects having "name" (string, uppercase) and "rate" (number in rupees). No explanation, just the JSON array.
-
-Text to parse:
-${extractedText}
-
-Example output format:
-[{"name": "SHURE SM58", "rate": 300}, {"name": "DI BOX", "rate": 250}]`
+              content: prompt
             }]
           })
         })
         
-        if (!anthropicResponse.ok) {
-          const errorText = await anthropicResponse.text()
-          console.error('Anthropic API error:', errorText)
+        if (!response.ok) {
+          const error = await response.text()
+          console.error('Anthropic API error:', error)
           return c.json({ 
             success: false, 
-            error: 'Anthropic API call failed. Please check your API key in Settings.',
-            details: anthropicResponse.status
+            error: 'Anthropic API error',
+            status: response.status,
+            details: error.substring(0, 500)
           }, 500)
         }
         
-        const anthropicData = await anthropicResponse.json() as any
-        const assistantMessage = anthropicData.content?.[0]?.text || ''
-        
-        // Parse the JSON response
-        const jsonMatch = assistantMessage.match(/\[[\s\S]*\]/)
-        if (!jsonMatch) {
-          return c.json({ 
-            success: false, 
-            error: 'Could not parse AI response. Please try again or use manual entry.' 
-          }, 500)
-        }
-        
-        const parsedItems = JSON.parse(jsonMatch[0])
-        
-        // Validate and clean the parsed items
-        const validItems = parsedItems
-          .filter((item: any) => item.name && typeof item.rate === 'number' && item.rate > 0)
-          .map((item: any) => ({
-            name: String(item.name).toUpperCase().trim(),
-            rate: Math.round(item.rate)
-          }))
-        
-        return c.json({ 
-          success: true, 
-          items: validItems, 
-          method: 'ai',
-          message: `AI successfully extracted ${validItems.length} equipment items`
-        })
-        
-      } catch (apiError: any) {
-        console.error('AI parsing error:', apiError)
-        return c.json({ 
-          success: false, 
-          error: 'AI parsing failed: ' + apiError.message 
-        }, 500)
+        const aiResult = await response.json()
+        aiResponse = aiResult.content[0].text
       }
-    }
-    
-    // No items found and AI not requested
-    if (basicParsedItems.length === 0) {
+    } catch (aiError: any) {
+      console.error('AI processing error:', aiError)
       return c.json({ 
         success: false, 
-        error: 'Could not extract equipment data. Try enabling AI parsing for better results.',
-        items: [],
-        suggestAI: true
-      }, 400)
+        error: 'AI processing failed',
+        details: aiError.message
+      }, 500)
     }
     
-    return c.json({ 
-      success: true, 
-      items: basicParsedItems,
-      method: 'basic'
-    })
+    aiResponse = aiResponse.trim()
     
-  } catch (error: any) {
-    console.error('Document parsing error:', error)
-    return c.json({ success: false, error: error.message }, 500)
-  }
-})
-
-// Import multiple equipment items at once
-app.post('/api/equipment/bulk-import', async (c) => {
-  try {
-    const { items } = await c.req.json()
+    // Clean up response - remove markdown if present
+    aiResponse = aiResponse.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim()
     
-    if (!items || !Array.isArray(items) || items.length === 0) {
-      return c.json({ success: false, error: 'No items to import' }, 400)
-    }
+    console.log('AI Response:', aiResponse)
     
-    const results = { imported: 0, skipped: 0, errors: [] as string[] }
-    
-    for (const item of items) {
-      try {
-        if (!item.name || !item.rate) {
-          results.skipped++
-          continue
-        }
-        
-        // Check if equipment already exists (by name)
-        const existing = await c.env.DB.prepare(
-          'SELECT id FROM equipment WHERE UPPER(name) = ?'
-        ).bind(item.name.toUpperCase()).first()
-        
-        if (existing) {
-          // Update existing
-          await c.env.DB.prepare(
-            'UPDATE equipment SET rate = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?'
-          ).bind(item.rate, existing.id).run()
-          results.imported++
-        } else {
-          // Insert new
-          await c.env.DB.prepare(
-            'INSERT INTO equipment (name, rate) VALUES (?, ?)'
-          ).bind(item.name.toUpperCase(), item.rate).run()
-          results.imported++
-        }
-      } catch (itemError: any) {
-        results.errors.push(`${item.name}: ${itemError.message}`)
-        results.skipped++
-      }
-    }
-    
-    return c.json({ 
-      success: true, 
-      message: `Imported ${results.imported} items, skipped ${results.skipped}`,
-      ...results 
-    })
-    
-  } catch (error: any) {
-    return c.json({ success: false, error: error.message }, 500)
-  }
-})
-
-// ============================================
-// SETTINGS API
-// ============================================
-app.get('/api/settings', async (c) => {
-  try {
-    const settings = await c.env.DB.prepare('SELECT username, anthropic_api_key, api_key_iv, updated_at FROM app_settings WHERE id = 1').first() as any
-    
-    if (!settings) {
-      return c.json({ success: true, data: { username: 'ncpalivesound', hasApiKey: false } })
-    }
-    
-    return c.json({ 
-      success: true, 
-      data: { 
-        username: settings.username,
-        hasApiKey: !!settings.anthropic_api_key && settings.anthropic_api_key !== '',
-        updatedAt: settings.updated_at
-      } 
-    })
-  } catch (error: any) {
-    return c.json({ success: false, error: error.message }, 500)
-  }
-})
-
-app.post('/api/settings/update', async (c) => {
-  try {
-    const { currentPassword, newUsername, newPassword, anthropicApiKey } = await c.req.json()
-    
-    // Get current settings
-    const settings = await c.env.DB.prepare('SELECT * FROM app_settings WHERE id = 1').first() as any
-    
-    if (!settings) {
-      return c.json({ success: false, error: 'Settings not initialized' }, 400)
-    }
-    
-    // Verify current password
-    if (settings.password_hash === 'NEEDS_INIT') {
-      // First-time setup - use env vars
-      const validPass = c.env.APP_PASSWORD || 'hangover123'
-      if (currentPassword !== validPass) {
-        return c.json({ success: false, error: 'Current password is incorrect' }, 401)
-      }
-    } else {
-      const passwordValid = await verifyPassword(currentPassword, settings.password_hash, settings.password_salt)
-      if (!passwordValid) {
-        return c.json({ success: false, error: 'Current password is incorrect' }, 401)
-      }
-    }
-    
-    // Prepare updates
-    const updates: string[] = []
-    const values: any[] = []
-    
-    // Update username if provided
-    if (newUsername && newUsername.trim() !== '') {
-      updates.push('username = ?')
-      values.push(newUsername.trim())
-    }
-    
-    // Update password if provided (also regenerate JWT secret)
-    let passwordForEncryption = currentPassword
-    if (newPassword && newPassword.trim() !== '') {
-      const { hash, salt } = await hashPassword(newPassword)
-      const newJwtSecret = generateJwtSecret()
-      updates.push('password_hash = ?', 'password_salt = ?', 'jwt_secret = ?')
-      values.push(hash, salt, newJwtSecret)
-      passwordForEncryption = newPassword
-    }
-    
-    // Update API key if provided
-    if (anthropicApiKey !== undefined) {
-      if (anthropicApiKey === '' || anthropicApiKey === null) {
-        // Clear API key
-        updates.push('anthropic_api_key = ?', 'api_key_iv = ?')
-        values.push(null, null)
+    // Parse the JSON array from AI
+    let results = []
+    try {
+      // Try to extract JSON if AI added extra text
+      const jsonMatch = aiResponse.match(/\[[\s\S]*\]/)
+      if (jsonMatch) {
+        results = JSON.parse(jsonMatch[0])
       } else {
-        // Encrypt and store API key
-        const { encrypted, iv } = await encryptApiKey(anthropicApiKey, passwordForEncryption)
-        updates.push('anthropic_api_key = ?', 'api_key_iv = ?')
-        values.push(encrypted, iv)
+        results = JSON.parse(aiResponse)
       }
+      
+      // Validate it's an array
+      if (!Array.isArray(results)) {
+        console.error('AI response is not an array:', results)
+        return c.json({ 
+          success: false, 
+          error: 'AI returned invalid format',
+          debug: aiResponse.substring(0, 200)
+        }, 500)
+      }
+      
+    } catch (parseError: any) {
+      console.error('Failed to parse AI response:', parseError)
+      console.error('Raw AI response:', aiResponse)
+      return c.json({ 
+        success: false, 
+        error: 'AI returned unparseable data: ' + parseError.message,
+        debug: aiResponse.substring(0, 200)
+      }, 500)
     }
     
-    if (updates.length === 0) {
-      return c.json({ success: false, error: 'No changes to save' }, 400)
-    }
+    // Ensure results have required fields
+    results = results.map(r => ({
+      event_date: r.event_date || r.date || '',
+      program: r.program || r.title || 'Event',
+      venue: r.venue || '',
+      crew: r.crew || '',
+      team: r.team || ''
+    }))
     
-    updates.push('updated_at = CURRENT_TIMESTAMP')
-    values.push(1) // for WHERE id = 1
+    return c.json({ 
+      success: true,
+      query: query,
+      data: results,
+      explanation: `AI analyzed ${allEvents.results.length} events and found ${results.length} results`,
+      method: c.env.AI ? 'AI Analysis (Cloudflare Llama 3.1)' : 'AI Analysis (Claude Haiku)'
+    })
     
-    const query = `UPDATE app_settings SET ${updates.join(', ')} WHERE id = ?`
-    await c.env.DB.prepare(query).bind(...values).run()
-    
-    // If password changed, user needs to re-login
-    if (newPassword && newPassword.trim() !== '') {
-      setCookie(c, 'auth_token', '', { maxAge: 0, path: '/' })
-      return c.json({ success: true, message: 'Settings updated. Please login with your new password.', requireRelogin: true })
-    }
-    
-    return c.json({ success: true, message: 'Settings updated successfully' })
   } catch (error: any) {
-    console.error('Settings update error:', error)
-    return c.json({ success: false, error: error.message }, 500)
+    console.error('AI query error:', error)
+    return c.json({ 
+      success: false, 
+      error: 'AI query failed',
+      details: error.message,
+      stack: error.stack?.substring(0, 300)
+    }, 500)
   }
 })
 
-// Get decrypted API key (for internal use)
-app.post('/api/settings/get-api-key', async (c) => {
-  try {
-    const { password } = await c.req.json()
-    
-    const settings = await c.env.DB.prepare('SELECT * FROM app_settings WHERE id = 1').first() as any
-    
-    if (!settings || !settings.anthropic_api_key || !settings.api_key_iv) {
-      return c.json({ success: false, error: 'No API key configured' }, 404)
-    }
-    
-    // Verify password first
-    const passwordValid = await verifyPassword(password, settings.password_hash, settings.password_salt)
-    if (!passwordValid) {
-      return c.json({ success: false, error: 'Invalid password' }, 401)
-    }
-    
-    const apiKey = await decryptApiKey(settings.anthropic_api_key, settings.api_key_iv, password)
-    if (!apiKey) {
-      return c.json({ success: false, error: 'Failed to decrypt API key' }, 500)
-    }
-    
-    return c.json({ success: true, apiKey })
-  } catch (error: any) {
-    return c.json({ success: false, error: error.message }, 500)
-  }
-})
-
-
-// ============================================
-// AI-POWERED EVENT SCHEDULE PARSER (Original from ncpa-sound-manager)
-// ============================================
-
-// Helper function: Parse a chunk of text with Claude (ORIGINAL PROMPT - DO NOT MODIFY)
+// Helper function: Parse a chunk of text with Claude
 async function parseChunkWithClaude(chunk: string, contextHint: string, apiKey: string, chunkNumber: number, totalChunks: number): Promise<any[]> {
   const prompt = `You are parsing section ${chunkNumber} of ${totalChunks} from an NCPA Sound Crew event schedule document. Extract ALL events from this section and return them as a JSON array.${contextHint}
 
@@ -1472,7 +1422,7 @@ If no events found, return: []`
     throw new Error(`AI parsing failed for chunk ${chunkNumber}`)
   }
   
-  const aiResult = await response.json() as any
+  const aiResult = await response.json()
   let aiResponse = aiResult.content[0].text.trim()
   
   // Remove markdown code blocks if present
@@ -1507,7 +1457,7 @@ If no events found, return: []`
 // Helper function: Remove duplicate events
 function deduplicateEvents(events: any[]): any[] {
   const seen = new Set()
-  const unique: any[] = []
+  const unique = []
   
   for (const event of events) {
     // Create unique key from date + program + venue
@@ -1522,47 +1472,20 @@ function deduplicateEvents(events: any[]): any[] {
   return unique
 }
 
-// AI-powered Word document parser for event schedules (ORIGINAL IMPLEMENTATION)
+// AI-powered Word document parser with chunked processing
 app.post('/api/ai/parse-word', async (c) => {
   try {
     const body = await c.req.json()
-    const { text, filename, password } = body
+    const { text, filename } = body
     
     if (!text) {
       return c.json({ success: false, error: 'Document text is required' }, 400)
     }
     
-    // Get API key from Settings database (instead of env)
-    const settings = await c.env.DB.prepare(
-      'SELECT anthropic_api_key, api_key_iv, password_hash, password_salt FROM app_settings WHERE id = 1'
-    ).first() as any
-    
-    if (!settings || !settings.anthropic_api_key || !settings.api_key_iv) {
-      return c.json({ 
-        success: false, 
-        error: 'No Anthropic API key configured. Please add your API key in Settings.',
-        requiresApiKey: true
-      }, 400)
-    }
-    
-    if (!password) {
-      return c.json({ 
-        success: false, 
-        error: 'Password required to decrypt API key',
-        requiresPassword: true
-      }, 400)
-    }
-    
-    // Verify password
-    const passwordValid = await verifyPassword(password, settings.password_hash, settings.password_salt)
-    if (!passwordValid) {
-      return c.json({ success: false, error: 'Invalid password' }, 401)
-    }
-    
-    // Decrypt the API key
-    const apiKey = await decryptApiKey(settings.anthropic_api_key, settings.api_key_iv, password)
+    // Get API key from environment
+    const apiKey = c.env.ANTHROPIC_API_KEY
     if (!apiKey) {
-      return c.json({ success: false, error: 'Failed to decrypt API key. Please re-enter your API key in Settings.' }, 500)
+      return c.json({ success: false, error: 'AI service not configured' }, 500)
     }
     
     // Extract month/year context from filename if available
@@ -1662,1349 +1585,2034 @@ app.post('/api/ai/parse-word', async (c) => {
   }
 })
 
-
 // ============================================
-// MAIN UI
+// FRONTEND ROUTES
 // ============================================
-app.get('/', (c) => {
-  return c.html(MainApp())
-})
 
-app.get('/schedule', (c) => c.html(MainApp('schedule')))
-app.get('/crew', (c) => c.html(MainApp('crew')))
-app.get('/quotes', (c) => c.html(MainApp('quotes')))
-app.get('/equipment', (c) => c.html(MainApp('equipment')))
-app.get('/settings', (c) => c.html(MainApp('settings')))
-
-function MainApp(activeTab = 'schedule') {
-  return `
+// Minimal Safari test page with NO external dependencies
+app.get('/safari-test', (c) => {
+  return c.html(`
     <!DOCTYPE html>
     <html>
     <head>
-      <meta charset="UTF-8">
-      <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <title>NCPA Sound Ops</title>
-      <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600&display=swap" rel="stylesheet">
-      <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
-      <style>${STYLES}</style>
+        <meta charset="UTF-8">
+        <title>Safari Test</title>
+        <style>
+          body { 
+            font-family: Arial, sans-serif; 
+            padding: 40px; 
+            background: #f0f0f0;
+          }
+          .box {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+          }
+          .success { color: green; font-weight: bold; }
+          .error { color: red; font-weight: bold; }
+        </style>
+        <script>
+          console.log('✅ TEST 1: JavaScript is executing');
+          
+          function runTests() {
+            console.log('✅ TEST 2: Functions work');
+            
+            var result = document.getElementById('result');
+            result.innerHTML = '<p class="success">✅ JavaScript is working!</p>';
+            result.innerHTML += '<p>✅ DOM manipulation works</p>';
+            result.innerHTML += '<p>✅ Browser: ' + navigator.userAgent + '</p>';
+            
+            console.log('✅ TEST 3: DOM manipulation successful');
+          }
+          
+          window.onload = function() {
+            console.log('✅ TEST 4: Window.onload fired');
+            runTests();
+          };
+        </script>
     </head>
     <body>
-      <div class="container">
-        <header class="flex flex-between flex-center mb-2">
-          <h1 style="font-size:1rem;color:#f59e0b;font-weight:600;">NCPA SOUND OPS</h1>
-          <div class="flex gap-1 flex-center">
-            <a href="/settings" class="nav-link ${activeTab === 'settings' ? 'active' : ''}" style="padding:0.4rem 0.75rem;" title="Settings">⚙️</a>
-            <button onclick="logout()" class="text-sm">Logout</button>
-          </div>
-        </header>
-        
-        <nav class="nav">
-          <a href="/schedule" class="nav-link ${activeTab === 'schedule' ? 'active' : ''}">Schedule</a>
-          <a href="/crew" class="nav-link ${activeTab === 'crew' ? 'active' : ''}">Crew Assignment</a>
-          <a href="/quotes" class="nav-link ${activeTab === 'quotes' ? 'active' : ''}">Quote Builder</a>
-          <a href="/equipment" class="nav-link ${activeTab === 'equipment' ? 'active' : ''}">Manage Equipment</a>
-        </nav>
-        
-        <div id="app">Loading...</div>
-      </div>
-      
-      <script>
-        const activeTab = '${activeTab}';
-        
-        async function logout() {
-          await fetch('/api/auth/logout', { method: 'POST' });
-          window.location.href = '/login';
-        }
-        
-        // ============================================
-        // STATE
-        // ============================================
-        let state = {
-          events: [],
-          crew: [],
-          equipment: [],
-          unavailability: [],
-          currentMonth: new Date().toISOString().slice(0, 7),
-          assignments: [],
-          workflowStep: 0,
-          quoteItems: [],
-          quoteNotes: '',
-          generatedQuote: null,
-        };
-        
-        // ============================================
-        // API HELPERS
-        // ============================================
-        async function api(path, opts = {}) {
-          const res = await fetch(path, {
-            ...opts,
-            headers: { 'Content-Type': 'application/json', ...opts.headers }
-          });
-          return res.json();
-        }
-        
-        // ============================================
-        // SCHEDULE MODULE
-        // ============================================
-        async function loadSchedule() {
-          const [eventsRes, crewRes] = await Promise.all([
-            api('/api/events'),
-            api('/api/crew')
-          ]);
-          state.events = eventsRes.data || [];
-          state.crew = crewRes.data || [];
-          renderSchedule();
-        }
-        
-        function renderSchedule() {
-          const month = state.currentMonth;
-          const [year, mon] = month.split('-').map(Number);
-          const firstDay = new Date(year, mon - 1, 1);
-          const lastDay = new Date(year, mon, 0);
-          const daysInMonth = lastDay.getDate();
-          const startDow = firstDay.getDay();
-          
-          const monthEvents = state.events.filter(e => e.event_date.startsWith(month));
-          const eventsByDate = {};
-          monthEvents.forEach(e => {
-            if (!eventsByDate[e.event_date]) eventsByDate[e.event_date] = [];
-            eventsByDate[e.event_date].push(e);
-          });
-          
-          const today = new Date().toISOString().slice(0, 10);
-          
-          let calendarHtml = '<div class="calendar-grid">';
-          ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].forEach(d => {
-            calendarHtml += '<div style="background:#1a1a1a;padding:0.25rem;font-size:0.65rem;text-align:center;color:#737373;">' + d + '</div>';
-          });
-          
-          for (let i = 0; i < startDow; i++) {
-            calendarHtml += '<div class="calendar-day" style="background:#0d0d0d;"></div>';
-          }
-          
-          for (let d = 1; d <= daysInMonth; d++) {
-            const dateStr = month + '-' + String(d).padStart(2, '0');
-            const isToday = dateStr === today;
-            const dayEvents = eventsByDate[dateStr] || [];
-            
-            calendarHtml += '<div class="calendar-day' + (isToday ? ' today' : '') + '">';
-            calendarHtml += '<div class="calendar-day-header">' + d + '</div>';
-            dayEvents.slice(0, 3).forEach(e => {
-              calendarHtml += '<div class="calendar-event" title="' + e.program + ' - ' + e.venue + '">' + 
-                (e.venue || '').slice(0, 8) + ': ' + (e.program || '').slice(0, 15) + '</div>';
-            });
-            if (dayEvents.length > 3) {
-              calendarHtml += '<div class="text-sm text-muted">+' + (dayEvents.length - 3) + ' more</div>';
-            }
-            calendarHtml += '</div>';
-          }
-          calendarHtml += '</div>';
-          
-          document.getElementById('app').innerHTML = \`
-            <div class="card">
-              <div class="flex flex-between flex-center mb-2">
-                <div class="flex gap-1 flex-center">
-                  <button onclick="prevMonth()">◀</button>
-                  <input type="month" value="\${month}" onchange="setMonth(this.value)" style="width:150px;" />
-                  <button onclick="nextMonth()">▶</button>
-                </div>
-                <div class="flex gap-1">
-                  <input type="text" placeholder="Search events..." id="searchInput" onkeyup="searchEvents(this.value)" style="width:200px;" />
-                  <button class="primary" onclick="showAddEvent()">+ Add Event</button>
-                </div>
-              </div>
-              \${calendarHtml}
+        <div class="box">
+            <h1>🦁 Safari Test Page</h1>
+            <p>This page has NO external scripts, NO CDN, NO dependencies.</p>
+            <p>If you see green checkmarks below, JavaScript is working:</p>
+            <div id="result">
+                <p class="error">❌ JavaScript not running (if you see this red message)</p>
             </div>
-            
-            <div class="card">
-              <div class="card-header">Events This Month (\${monthEvents.length})</div>
-              <table>
-                <thead>
-                  <tr>
-                    <th>Date</th>
-                    <th>Program</th>
-                    <th>Venue</th>
-                    <th>Team</th>
-                    <th>Crew</th>
-                    <th>Call Time</th>
-                    <th>Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  \${monthEvents.map(e => \`
-                    <tr>
-                      <td>\${e.event_date}</td>
-                      <td>\${e.program || '-'}</td>
-                      <td>\${e.venue || '-'}</td>
-                      <td>\${e.team || '-'}</td>
-                      <td>\${e.crew || '<span class="text-muted">Unassigned</span>'}</td>
-                      <td>\${e.call_time || '-'}</td>
-                      <td>
-                        <button onclick="editEvent(\${e.id})">Edit</button>
-                        <button class="danger" onclick="deleteEvent(\${e.id})">×</button>
-                      </td>
-                    </tr>
-                  \`).join('')}
-                </tbody>
-              </table>
-            </div>
-          \`;
-        }
-        
-        function prevMonth() {
-          const [y, m] = state.currentMonth.split('-').map(Number);
-          const d = new Date(y, m - 2, 1);
-          state.currentMonth = d.toISOString().slice(0, 7);
-          renderSchedule();
-        }
-        
-        function nextMonth() {
-          const [y, m] = state.currentMonth.split('-').map(Number);
-          const d = new Date(y, m, 1);
-          state.currentMonth = d.toISOString().slice(0, 7);
-          renderSchedule();
-        }
-        
-        function setMonth(m) {
-          state.currentMonth = m;
-          renderSchedule();
-        }
-        
-        async function searchEvents(q) {
-          if (!q || q.length < 2) {
-            loadSchedule();
-            return;
-          }
-          const res = await api('/api/events/search?q=' + encodeURIComponent(q));
-          state.events = res.data || [];
-          renderSchedule();
-        }
-        
-        function showAddEvent() {
-          const html = \`
-            <div class="card">
-              <div class="card-header">Add New Event</div>
-              <form id="eventForm" onsubmit="saveEvent(event)">
-                <div class="grid grid-2 gap-2 mb-2">
-                  <div>
-                    <label class="text-sm text-muted">Date</label>
-                    <input type="date" name="event_date" required />
-                  </div>
-                  <div>
-                    <label class="text-sm text-muted">Call Time</label>
-                    <input type="text" name="call_time" placeholder="e.g., 10:00 AM" />
-                  </div>
-                </div>
-                <div class="mb-2">
-                  <label class="text-sm text-muted">Program</label>
-                  <input type="text" name="program" required />
-                </div>
-                <div class="grid grid-2 gap-2 mb-2">
-                  <div>
-                    <label class="text-sm text-muted">Venue</label>
-                    <input type="text" name="venue" required />
-                  </div>
-                  <div>
-                    <label class="text-sm text-muted">Team</label>
-                    <input type="text" name="team" />
-                  </div>
-                </div>
-                <div class="mb-2">
-                  <label class="text-sm text-muted">Sound Requirements</label>
-                  <textarea name="sound_requirements" rows="2"></textarea>
-                </div>
-                <div class="mb-2">
-                  <label class="text-sm text-muted">Crew</label>
-                  <input type="text" name="crew" />
-                </div>
-                <div class="flex gap-1">
-                  <button type="submit" class="primary">Save</button>
-                  <button type="button" onclick="loadSchedule()">Cancel</button>
-                </div>
-              </form>
-            </div>
-          \`;
-          document.getElementById('app').innerHTML = html;
-        }
-        
-        async function saveEvent(e) {
-          e.preventDefault();
-          const form = e.target;
-          const data = {
-            event_date: form.event_date.value,
-            program: form.program.value,
-            venue: form.venue.value,
-            team: form.team.value,
-            sound_requirements: form.sound_requirements.value,
-            call_time: form.call_time.value,
-            crew: form.crew.value
-          };
-          await api('/api/events', { method: 'POST', body: JSON.stringify(data) });
-          loadSchedule();
-        }
-        
-        async function editEvent(id) {
-          const event = state.events.find(e => e.id === id);
-          if (!event) return;
-          
-          const html = \`
-            <div class="card">
-              <div class="card-header">Edit Event</div>
-              <form id="eventForm" onsubmit="updateEvent(event, \${id})">
-                <div class="grid grid-2 gap-2 mb-2">
-                  <div>
-                    <label class="text-sm text-muted">Date</label>
-                    <input type="date" name="event_date" value="\${event.event_date}" required />
-                  </div>
-                  <div>
-                    <label class="text-sm text-muted">Call Time</label>
-                    <input type="text" name="call_time" value="\${event.call_time || ''}" />
-                  </div>
-                </div>
-                <div class="mb-2">
-                  <label class="text-sm text-muted">Program</label>
-                  <input type="text" name="program" value="\${event.program}" required />
-                </div>
-                <div class="grid grid-2 gap-2 mb-2">
-                  <div>
-                    <label class="text-sm text-muted">Venue</label>
-                    <input type="text" name="venue" value="\${event.venue}" required />
-                  </div>
-                  <div>
-                    <label class="text-sm text-muted">Team</label>
-                    <input type="text" name="team" value="\${event.team || ''}" />
-                  </div>
-                </div>
-                <div class="mb-2">
-                  <label class="text-sm text-muted">Sound Requirements</label>
-                  <textarea name="sound_requirements" rows="2">\${event.sound_requirements || ''}</textarea>
-                </div>
-                <div class="mb-2">
-                  <label class="text-sm text-muted">Crew</label>
-                  <input type="text" name="crew" value="\${event.crew || ''}" />
-                </div>
-                <div class="flex gap-1">
-                  <button type="submit" class="primary">Update</button>
-                  <button type="button" onclick="loadSchedule()">Cancel</button>
-                </div>
-              </form>
-            </div>
-          \`;
-          document.getElementById('app').innerHTML = html;
-        }
-        
-        async function updateEvent(e, id) {
-          e.preventDefault();
-          const form = e.target;
-          const data = {
-            event_date: form.event_date.value,
-            program: form.program.value,
-            venue: form.venue.value,
-            team: form.team.value,
-            sound_requirements: form.sound_requirements.value,
-            call_time: form.call_time.value,
-            crew: form.crew.value
-          };
-          await api('/api/events/' + id, { method: 'PUT', body: JSON.stringify(data) });
-          loadSchedule();
-        }
-        
-        async function deleteEvent(id) {
-          if (!confirm('Delete this event?')) return;
-          await api('/api/events/' + id, { method: 'DELETE' });
-          loadSchedule();
-        }
-        
-        // ============================================
-        // CREW ASSIGNMENT MODULE
-        // ============================================
-        async function loadCrew() {
-          const [crewRes, unavailRes, eventsRes] = await Promise.all([
-            api('/api/crew'),
-            api('/api/crew/unavailability?month=' + state.currentMonth),
-            api('/api/events/month/' + state.currentMonth)
-          ]);
-          state.crew = crewRes.data || [];
-          state.unavailability = unavailRes.data || [];
-          state.events = eventsRes.data || [];
-          renderCrew();
-        }
-        
-        function renderCrew() {
-          const steps = ['Mark Day-offs', 'Import Events', 'Set Requirements', 'Auto-Assign', 'Review & Push'];
-          
-          document.getElementById('app').innerHTML = \`
-            <div class="card">
-              <div class="flex flex-between flex-center mb-2">
-                <div class="flex gap-1 flex-center">
-                  <button onclick="prevMonthCrew()">◀</button>
-                  <input type="month" value="\${state.currentMonth}" onchange="setMonthCrew(this.value)" style="width:150px;" />
-                  <button onclick="nextMonthCrew()">▶</button>
-                </div>
-              </div>
-              
-              <div class="workflow-steps">
-                \${steps.map((s, i) => \`
-                  <div class="workflow-step \${i === state.workflowStep ? 'active' : ''} \${i < state.workflowStep ? 'completed' : ''}" 
-                       onclick="setWorkflowStep(\${i})">\${i + 1}. \${s}</div>
-                \`).join('')}
-              </div>
-              
-              <div id="workflowContent"></div>
-            </div>
-          \`;
-          
-          renderWorkflowStep();
-        }
-        
-        function setWorkflowStep(step) {
-          state.workflowStep = step;
-          renderWorkflowStep();
-        }
-        
-        function renderWorkflowStep() {
-          const content = document.getElementById('workflowContent');
-          switch (state.workflowStep) {
-            case 0: renderDayOffs(content); break;
-            case 1: renderImportEvents(content); break;
-            case 2: renderRequirements(content); break;
-            case 3: renderAutoAssign(content); break;
-            case 4: renderReviewPush(content); break;
-          }
-        }
-        
-        function renderDayOffs(container) {
-          const month = state.currentMonth;
-          const [year, mon] = month.split('-').map(Number);
-          const daysInMonth = new Date(year, mon, 0).getDate();
-          
-          const unavailByCrewDate = new Map();
-          state.unavailability.forEach(u => {
-            unavailByCrewDate.set(u.crew_id + '-' + u.unavailable_date, true);
-          });
-          
-          const levelColors = { Senior: 'badge-senior', Mid: 'badge-mid', Junior: 'badge-junior', Hired: 'badge-hired' };
-          
-          container.innerHTML = \`
-            <div class="card-header">Mark Day-offs for \${month}</div>
-            <p class="text-sm text-muted mb-2">Click on a date cell to toggle day-off for that crew member.</p>
-            <div style="overflow-x:auto;">
-              <table style="min-width:800px;">
-                <thead>
-                  <tr>
-                    <th style="width:120px;">Crew</th>
-                    \${Array.from({length: daysInMonth}, (_, i) => '<th style="width:30px;text-align:center;">' + (i+1) + '</th>').join('')}
-                  </tr>
-                </thead>
-                <tbody>
-                  \${state.crew.map(c => \`
-                    <tr>
-                      <td>
-                        <span class="badge \${levelColors[c.level]}">\${c.level.slice(0,1)}</span>
-                        \${c.name}
-                      </td>
-                      \${Array.from({length: daysInMonth}, (_, i) => {
-                        const d = i + 1;
-                        const dateStr = month + '-' + String(d).padStart(2, '0');
-                        const dow = new Date(year, mon - 1, d).getDay();
-                        const isWeekend = dow === 0 || dow === 6;
-                        const isUnavail = unavailByCrewDate.has(c.id + '-' + dateStr);
-                        return \`<td class="day-off-cell \${isUnavail ? 'unavailable' : ''} \${isWeekend ? 'weekend' : ''}"
-                                    onclick="toggleDayOff(\${c.id}, '\${dateStr}')"
-                                    title="\${c.name} - \${dateStr}">\${isUnavail ? '×' : ''}</td>\`;
-                      }).join('')}
-                    </tr>
-                  \`).join('')}
-                </tbody>
-              </table>
-            </div>
-            <div class="flex gap-1 mt-2" style="margin-top:1rem;">
-              <button class="primary" onclick="setWorkflowStep(1)">Next: Import Events →</button>
-            </div>
-          \`;
-        }
-        
-        async function toggleDayOff(crewId, date) {
-          const key = crewId + '-' + date;
-          const existing = state.unavailability.find(u => u.crew_id === crewId && u.unavailable_date === date);
-          
-          if (existing) {
-            await api('/api/crew/unavailability/' + crewId + '/' + date, { method: 'DELETE' });
-            state.unavailability = state.unavailability.filter(u => u !== existing);
-          } else {
-            await api('/api/crew/unavailability', { 
-              method: 'POST', 
-              body: JSON.stringify({ crew_id: crewId, unavailable_date: date }) 
-            });
-            state.unavailability.push({ crew_id: crewId, unavailable_date: date });
-          }
-          renderWorkflowStep();
-        }
-        
-        function renderImportEvents(container) {
-          const monthEvents = state.events;
-          
-          container.innerHTML = \`
-            <div class="card-header">Events for \${state.currentMonth}</div>
-            <p class="text-sm text-muted mb-2">\${monthEvents.length} events found for this month from the Schedule.</p>
-            <table>
-              <thead>
-                <tr>
-                  <th>Date</th>
-                  <th>Program</th>
-                  <th>Venue</th>
-                  <th>Team</th>
-                  <th>Current Crew</th>
-                </tr>
-              </thead>
-              <tbody>
-                \${monthEvents.map(e => \`
-                  <tr>
-                    <td>\${e.event_date}</td>
-                    <td>\${e.program || '-'}</td>
-                    <td>\${e.venue || '-'}</td>
-                    <td>\${e.team || '-'}</td>
-                    <td>\${e.crew || '<span class="text-muted">None</span>'}</td>
-                  </tr>
-                \`).join('')}
-              </tbody>
-            </table>
-            <div class="flex gap-1 mt-2" style="margin-top:1rem;">
-              <button onclick="setWorkflowStep(0)">← Back</button>
-              <button class="primary" onclick="setWorkflowStep(2)">Next: Set Requirements →</button>
-            </div>
-          \`;
-        }
-        
-        function renderRequirements(container) {
-          container.innerHTML = \`
-            <div class="card-header">Set Crew Requirements</div>
-            <p class="text-sm text-muted mb-2">Requirements are auto-determined based on venue size. Large venues (JBT, Tata, Experimental) need FOH + Stage crew.</p>
-            <div class="grid grid-3 gap-2">
-              <div class="card" style="background:#1a1a1a;">
-                <div class="text-accent">JBT / Tata Theatre</div>
-                <div class="text-sm text-muted">FOH + Stage (2-3 crew)</div>
-              </div>
-              <div class="card" style="background:#1a1a1a;">
-                <div class="text-accent">Experimental Theatre</div>
-                <div class="text-sm text-muted">FOH + Stage (2 crew)</div>
-              </div>
-              <div class="card" style="background:#1a1a1a;">
-                <div class="text-accent">Other Venues</div>
-                <div class="text-sm text-muted">FOH only (1 crew)</div>
-              </div>
-            </div>
-            <div class="flex gap-1 mt-2" style="margin-top:1rem;">
-              <button onclick="setWorkflowStep(1)">← Back</button>
-              <button class="primary" onclick="runAutoAssign()">Next: Run Auto-Assign →</button>
-            </div>
-          \`;
-        }
-        
-        async function runAutoAssign() {
-          setWorkflowStep(3);
-          const content = document.getElementById('workflowContent');
-          content.innerHTML = '<div class="text-accent">Running assignment engine...</div>';
-          
-          const res = await api('/api/assignments/auto-assign', {
-            method: 'POST',
-            body: JSON.stringify({ month: state.currentMonth })
-          });
-          
-          if (res.success) {
-            state.assignments = res.assignments;
-            state.workload = res.workload;
-            renderAutoAssign(content);
-          } else {
-            content.innerHTML = '<div class="text-danger">Error: ' + res.error + '</div>';
-          }
-        }
-        
-        function renderAutoAssign(container) {
-          const byDate = {};
-          state.assignments.forEach(a => {
-            if (!byDate[a.event_date]) byDate[a.event_date] = [];
-            byDate[a.event_date].push(a);
-          });
-          
-          container.innerHTML = \`
-            <div class="card-header">Auto-Assignment Results</div>
-            <p class="text-sm text-success mb-2">✓ \${state.assignments.length} assignments generated for \${Object.keys(byDate).length} event days.</p>
-            
-            <table>
-              <thead>
-                <tr>
-                  <th>Date</th>
-                  <th>Program</th>
-                  <th>Venue</th>
-                  <th>FOH</th>
-                  <th>Stage</th>
-                </tr>
-              </thead>
-              <tbody>
-                \${Object.entries(byDate).map(([date, assigns]) => {
-                  const foh = assigns.find(a => a.role === 'FOH');
-                  const stage = assigns.find(a => a.role === 'Stage');
-                  return \`
-                    <tr>
-                      <td>\${date}</td>
-                      <td>\${foh?.program || '-'}</td>
-                      <td>\${foh?.venue || '-'}</td>
-                      <td>\${foh ? foh.crew_name : '<span class="text-danger">None</span>'}</td>
-                      <td>\${stage ? stage.crew_name : '-'}</td>
-                    </tr>
-                  \`;
-                }).join('')}
-              </tbody>
-            </table>
-            
-            <div class="card-header" style="margin-top:1rem;">Workload Summary</div>
-            <div class="grid grid-3 gap-1">
-              \${state.crew.map(c => \`
-                <div style="background:#1a1a1a;padding:0.5rem;font-size:0.75rem;">
-                  \${c.name}: <span class="text-accent">\${state.workload[c.id] || 0}</span> assignments
-                </div>
-              \`).join('')}
-            </div>
-            
-            <div class="flex gap-1 mt-2" style="margin-top:1rem;">
-              <button onclick="setWorkflowStep(2)">← Back</button>
-              <button class="primary" onclick="setWorkflowStep(4)">Next: Review & Push →</button>
-            </div>
-          \`;
-        }
-        
-        function renderReviewPush(container) {
-          // Check which events already have crew assigned
-          const eventsWithCrew = state.events.filter(e => e.crew && e.crew.trim() !== '');
-          const eventsWithoutCrew = state.events.filter(e => !e.crew || e.crew.trim() === '');
-          
-          container.innerHTML = \`
-            <div class="card-header">Review & Push to Calendar</div>
-            
-            <div class="diff-preview">
-              <div class="text-accent mb-1">Changes Preview:</div>
-              <div class="diff-add">+ \${state.assignments.length} crew assignments will be added</div>
-              <div class="diff-add">+ \${eventsWithoutCrew.length} events currently have no crew</div>
-              \${eventsWithCrew.length > 0 ? \`<div class="diff-remove">⚠ \${eventsWithCrew.length} events already have crew - will be overwritten</div>\` : ''}
-            </div>
-            
-            <p class="text-sm text-muted mb-2">Pushing will update the Schedule with these crew assignments.</p>
-            
-            <div class="flex gap-1 mt-2" style="margin-top:1rem;">
-              <button onclick="setWorkflowStep(3)">← Back</button>
-              <button class="primary" onclick="pushToCalendar()">Push to Calendar ✓</button>
-            </div>
-          \`;
-        }
-        
-        async function pushToCalendar() {
-          const content = document.getElementById('workflowContent');
-          content.innerHTML = '<div class="text-accent">Pushing assignments to calendar...</div>';
-          
-          const res = await api('/api/assignments/push-to-calendar', {
-            method: 'POST',
-            body: JSON.stringify({ assignments: state.assignments })
-          });
-          
-          if (res.success) {
-            content.innerHTML = \`
-              <div class="text-success" style="font-size:1.2rem;margin-bottom:1rem;">✓ Successfully updated \${res.updated} events!</div>
-              <p class="text-sm text-muted">The Schedule tab now reflects the new crew assignments.</p>
-              <div class="flex gap-1 mt-2" style="margin-top:1rem;">
-                <button onclick="setWorkflowStep(0)">Start New Assignment</button>
-                <a href="/schedule" class="nav-link primary">View Schedule →</a>
-              </div>
-            \`;
-          } else {
-            content.innerHTML = '<div class="text-danger">Error: ' + res.error + '</div>';
-          }
-        }
-        
-        function prevMonthCrew() {
-          const [y, m] = state.currentMonth.split('-').map(Number);
-          const d = new Date(y, m - 2, 1);
-          state.currentMonth = d.toISOString().slice(0, 7);
-          state.workflowStep = 0;
-          loadCrew();
-        }
-        
-        function nextMonthCrew() {
-          const [y, m] = state.currentMonth.split('-').map(Number);
-          const d = new Date(y, m, 1);
-          state.currentMonth = d.toISOString().slice(0, 7);
-          state.workflowStep = 0;
-          loadCrew();
-        }
-        
-        function setMonthCrew(m) {
-          state.currentMonth = m;
-          state.workflowStep = 0;
-          loadCrew();
-        }
-        
-        // ============================================
-        // QUOTE BUILDER MODULE
-        // ============================================
-        async function loadQuotes() {
-          const res = await api('/api/equipment');
-          state.equipment = res.data || [];
-          state.quoteItems = [{ equipment_id: null, name: '', rate: 0, qty: 1 }];
-          state.generatedQuote = null;
-          renderQuotes();
-        }
-        
-        function renderQuotes() {
-          if (state.generatedQuote) {
-            renderGeneratedQuote();
-            return;
-          }
-          
-          document.getElementById('app').innerHTML = \`
-            <div class="card">
-              <div class="card-header">Equipment Selection</div>
-              <div id="quoteItems">
-                \${state.quoteItems.map((item, i) => \`
-                  <div class="equipment-row">
-                    <div class="autocomplete">
-                      <input type="text" placeholder="Search equipment..." 
-                             value="\${item.name || ''}"
-                             oninput="searchEquipment(\${i}, this.value)"
-                             onfocus="searchEquipment(\${i}, this.value)" />
-                      <div id="autocomplete-\${i}" class="autocomplete-list" style="display:none;"></div>
-                    </div>
-                    <input type="number" min="1" value="\${item.qty}" 
-                           onchange="updateQty(\${i}, this.value)" style="text-align:center;" />
-                    <button class="danger" onclick="removeQuoteItem(\${i})">×</button>
-                  </div>
-                \`).join('')}
-              </div>
-              <button onclick="addQuoteItem()" style="margin-top:0.5rem;">+ Add Equipment Row</button>
-            </div>
-            
-            <div class="card">
-              <div class="card-header">Additional Notes</div>
-              <textarea id="quoteNotes" rows="4" placeholder="Enter any additional notes or requirements..."
-                        onchange="state.quoteNotes = this.value">\${state.quoteNotes}</textarea>
-            </div>
-            
-            <button class="primary" style="width:100%;padding:1rem;" onclick="createQuote()">CREATE QUOTE</button>
-          \`;
-        }
-        
-        let searchTimeout;
-        async function searchEquipment(index, query) {
-          clearTimeout(searchTimeout);
-          const dropdown = document.getElementById('autocomplete-' + index);
-          
-          if (!query || query.length < 1) {
-            dropdown.style.display = 'none';
-            return;
-          }
-          
-          searchTimeout = setTimeout(async () => {
-            const res = await api('/api/equipment/search?q=' + encodeURIComponent(query));
-            const items = res.data || [];
-            
-            if (items.length === 0) {
-              dropdown.style.display = 'none';
-              return;
-            }
-            
-            dropdown.innerHTML = items.map(eq => \`
-              <div class="autocomplete-item" onclick="selectEquipment(\${index}, \${eq.id}, '\${eq.name.replace(/'/g, "\\\\'")}', \${eq.rate})">
-                \${eq.name} - Rs. \${eq.rate}
-              </div>
-            \`).join('');
-            dropdown.style.display = 'block';
-          }, 150);
-        }
-        
-        function selectEquipment(index, id, name, rate) {
-          state.quoteItems[index] = { equipment_id: id, name, rate, qty: state.quoteItems[index].qty };
-          document.getElementById('autocomplete-' + index).style.display = 'none';
-          renderQuotes();
-        }
-        
-        function updateQty(index, qty) {
-          state.quoteItems[index].qty = parseInt(qty) || 1;
-        }
-        
-        function addQuoteItem() {
-          state.quoteItems.push({ equipment_id: null, name: '', rate: 0, qty: 1 });
-          renderQuotes();
-        }
-        
-        function removeQuoteItem(index) {
-          if (state.quoteItems.length > 1) {
-            state.quoteItems.splice(index, 1);
-            renderQuotes();
-          }
-        }
-        
-        function createQuote() {
-          const validItems = state.quoteItems.filter(i => i.equipment_id && i.rate > 0);
-          if (validItems.length === 0) {
-            alert('Please add at least one equipment item');
-            return;
-          }
-          
-          const subtotal = validItems.reduce((sum, i) => sum + (i.rate * i.qty), 0);
-          const gst = Math.round(subtotal * 0.18);
-          const total = subtotal + gst;
-          
-          state.generatedQuote = {
-            items: validItems,
-            subtotal,
-            gst,
-            total,
-            notes: state.quoteNotes
-          };
-          
-          renderGeneratedQuote();
-        }
-        
-        function renderGeneratedQuote() {
-          const q = state.generatedQuote;
-          
-          document.getElementById('app').innerHTML = \`
-            <div class="card">
-              <div class="flex flex-between flex-center mb-2">
-                <div class="card-header" style="margin:0;">Quote</div>
-                <div class="flex gap-1">
-                  <button onclick="copyQuote()">📋 Copy Quote</button>
-                  <button onclick="createNewQuote()">+ Create New Quote</button>
-                </div>
-              </div>
-              
-              <table class="quote-table">
-                <thead>
-                  <tr>
-                    <th>Item</th>
-                    <th style="text-align:right;">Unit Cost (Rs.)</th>
-                    <th style="text-align:center;">Qty</th>
-                    <th style="text-align:right;">Total (Rs.)</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  \${q.items.map(i => \`
-                    <tr>
-                      <td>\${i.name}</td>
-                      <td style="text-align:right;">\${i.rate.toFixed(2)}</td>
-                      <td style="text-align:center;">\${i.qty}</td>
-                      <td style="text-align:right;">\${(i.rate * i.qty).toFixed(2)}</td>
-                    </tr>
-                  \`).join('')}
-                  <tr class="quote-total">
-                    <td colspan="3" style="text-align:right;">Subtotal:</td>
-                    <td style="text-align:right;">\${q.subtotal.toFixed(2)}</td>
-                  </tr>
-                  <tr class="quote-total">
-                    <td colspan="3" style="text-align:right;">GST (18%):</td>
-                    <td style="text-align:right;">\${q.gst.toFixed(2)}</td>
-                  </tr>
-                  <tr class="quote-total" style="font-size:1rem;">
-                    <td colspan="3" style="text-align:right;"><strong>TOTAL:</strong></td>
-                    <td style="text-align:right;"><strong>\${q.total.toFixed(2)}</strong></td>
-                  </tr>
-                </tbody>
-              </table>
-              
-              \${q.notes ? \`
-                <div style="margin-top:1rem;">
-                  <div class="card-header">Additional Notes:</div>
-                  <div class="text-sm">\${q.notes}</div>
-                </div>
-              \` : ''}
-            </div>
-          \`;
-        }
-        
-        function copyQuote() {
-          const q = state.generatedQuote;
-          
-          // Build HTML table for rich text copy
-          let html = '<table border="1" cellpadding="5" style="border-collapse:collapse;font-family:Arial,sans-serif;">';
-          html += '<tr style="background:#f0f0f0;"><th>Item</th><th>Unit Cost (Rs.)</th><th>Qty</th><th>Total (Rs.)</th></tr>';
-          q.items.forEach(i => {
-            html += \`<tr><td>\${i.name}</td><td align="right">\${i.rate.toFixed(2)}</td><td align="center">\${i.qty}</td><td align="right">\${(i.rate * i.qty).toFixed(2)}</td></tr>\`;
-          });
-          html += \`<tr style="background:#e8f5e9;"><td colspan="3" align="right"><strong>Subtotal:</strong></td><td align="right">\${q.subtotal.toFixed(2)}</td></tr>\`;
-          html += \`<tr style="background:#e8f5e9;"><td colspan="3" align="right"><strong>GST (18%):</strong></td><td align="right">\${q.gst.toFixed(2)}</td></tr>\`;
-          html += \`<tr style="background:#c8e6c9;"><td colspan="3" align="right"><strong>TOTAL:</strong></td><td align="right"><strong>\${q.total.toFixed(2)}</strong></td></tr>\`;
-          html += '</table>';
-          if (q.notes) {
-            html += '<br><strong>Additional Notes:</strong><br>' + q.notes;
-          }
-          
-          // Try to copy as HTML
-          try {
-            const blob = new Blob([html], { type: 'text/html' });
-            const item = new ClipboardItem({ 'text/html': blob });
-            navigator.clipboard.write([item]);
-            alert('Quote copied to clipboard!');
-          } catch (e) {
-            // Fallback to plain text
-            let text = 'EQUIPMENT QUOTE\\n';
-            text += '='.repeat(50) + '\\n';
-            q.items.forEach(i => {
-              text += i.name + ' | Rs.' + i.rate + ' x ' + i.qty + ' = Rs.' + (i.rate * i.qty) + '\\n';
-            });
-            text += '-'.repeat(50) + '\\n';
-            text += 'Subtotal: Rs.' + q.subtotal + '\\n';
-            text += 'GST (18%): Rs.' + q.gst + '\\n';
-            text += 'TOTAL: Rs.' + q.total + '\\n';
-            if (q.notes) text += '\\nNotes: ' + q.notes;
-            navigator.clipboard.writeText(text);
-            alert('Quote copied to clipboard (plain text)!');
-          }
-        }
-        
-        function createNewQuote() {
-          state.quoteItems = [{ equipment_id: null, name: '', rate: 0, qty: 1 }];
-          state.quoteNotes = '';
-          state.generatedQuote = null;
-          renderQuotes();
-        }
-        
-        // ============================================
-        // EQUIPMENT MANAGEMENT MODULE
-        // ============================================
-        async function loadEquipment() {
-          const res = await api('/api/equipment');
-          state.equipment = res.data || [];
-          renderEquipment();
-        }
-        
-        function renderEquipment() {
-          document.getElementById('app').innerHTML = \`
-            <div class="card">
-              <div class="card-header">📄 Import from Word Document</div>
-              <div style="padding:1rem;">
-                <p class="text-muted text-sm mb-2">Upload a Word document (.docx) containing your equipment rate chart. AI will automatically extract equipment names and rates.</p>
-                <div class="flex gap-2 flex-center" style="flex-wrap:wrap;">
-                  <input type="file" id="docxUpload" accept=".docx" style="flex:1;min-width:200px;" />
-                  <label class="flex flex-center gap-1" style="cursor:pointer;">
-                    <input type="checkbox" id="useAICheck" checked />
-                    <span class="text-sm">Use AI Parsing</span>
-                  </label>
-                  <button onclick="parseDocx()" class="primary">📤 Parse Document</button>
-                </div>
-                <div id="parseStatus" class="mt-2" style="display:none;"></div>
-                <div id="parsedItems" style="display:none;margin-top:1rem;">
-                  <div class="flex flex-between flex-center mb-2">
-                    <span class="text-accent">Parsed Equipment Items</span>
-                    <button onclick="importParsedItems()" class="primary">✅ Import All</button>
-                  </div>
-                  <div id="parsedItemsList"></div>
-                </div>
-              </div>
-            </div>
-            
-            <div class="card">
-              <div class="card-header">Add New Equipment</div>
-              <form id="equipmentForm" onsubmit="addEquipment(event)" class="grid grid-2 gap-2">
-                <div>
-                  <label class="text-sm text-muted">Equipment Name</label>
-                  <input type="text" name="name" placeholder="e.g., SHURE SM58" required />
-                </div>
-                <div>
-                  <label class="text-sm text-muted">Rate (Rs.)</label>
-                  <input type="number" name="rate" placeholder="e.g., 300" required />
-                </div>
-                <div style="grid-column:span 2;">
-                  <button type="submit" class="primary">+ Add Equipment</button>
-                </div>
-              </form>
-            </div>
-            
-            <div class="card">
-              <div class="card-header">Equipment List (\${state.equipment.length})</div>
-              <div id="equipmentList">
-                \${state.equipment.map(eq => \`
-                  <div class="flex flex-between flex-center" style="padding:0.75rem;border-bottom:1px solid #262626;">
-                    <div>
-                      <span class="text-accent">\${eq.name}</span>
-                      <span class="text-muted" style="margin-left:1rem;">Rs. \${eq.rate}</span>
-                    </div>
-                    <div class="flex gap-1">
-                      <button onclick="editEquipment(\${eq.id})">✏️ Edit</button>
-                      <button class="danger" onclick="deleteEquipment(\${eq.id})">🗑️ Delete</button>
-                    </div>
-                  </div>
-                \`).join('')}
-              </div>
-            </div>
-          \`;
-        }
-        
-        // Store parsed items for import
-        let parsedEquipmentItems = [];
-        
-        async function parseDocx() {
-          const fileInput = document.getElementById('docxUpload');
-          const useAI = document.getElementById('useAICheck').checked;
-          const statusDiv = document.getElementById('parseStatus');
-          const parsedDiv = document.getElementById('parsedItems');
-          const listDiv = document.getElementById('parsedItemsList');
-          
-          if (!fileInput.files || !fileInput.files[0]) {
-            statusDiv.innerHTML = '<span class="text-danger">Please select a .docx file</span>';
-            statusDiv.style.display = 'block';
-            return;
-          }
-          
-          const file = fileInput.files[0];
-          if (!file.name.endsWith('.docx')) {
-            statusDiv.innerHTML = '<span class="text-danger">Please select a valid .docx file</span>';
-            statusDiv.style.display = 'block';
-            return;
-          }
-          
-          statusDiv.innerHTML = '<span class="text-muted">📂 Reading document...</span>';
-          statusDiv.style.display = 'block';
-          parsedDiv.style.display = 'none';
-          
-          try {
-            // Read the DOCX file and extract text content
-            const zip = await JSZip.loadAsync(file);
-            const documentXml = await zip.file('word/document.xml').async('string');
-            
-            // Extract text from XML
-            const textContent = documentXml.replace(/<w:t[^>]*>([^<]*)<\\/w:t>/g, '$1\\n')
-                                          .replace(/<[^>]+>/g, '')
-                                          .replace(/&lt;/g, '<')
-                                          .replace(/&gt;/g, '>')
-                                          .replace(/&amp;/g, '&');
-            
-            statusDiv.innerHTML = '<span class="text-muted">🔍 Parsing equipment data' + (useAI ? ' with AI' : '') + '...</span>';
-            
-            // Prepare request body
-            let body = { documentContent: textContent, useAI: useAI };
-            
-            // If using AI, we need the user's password
-            if (useAI) {
-              const password = prompt('Enter your password to use AI parsing (required to access API key):');
-              if (!password) {
-                statusDiv.innerHTML = '<span class="text-warning">AI parsing cancelled. Trying basic parsing...</span>';
-                body.useAI = false;
-              } else {
-                body.password = password;
-              }
-            }
-            
-            const res = await api('/api/equipment/parse-docx', {
-              method: 'POST',
-              body: JSON.stringify(body)
-            });
-            
-            if (!res.success) {
-              if (res.requiresApiKey) {
-                statusDiv.innerHTML = '<span class="text-warning">⚠️ ' + res.error + '</span><br><a href="/settings" class="text-accent">Go to Settings</a>';
-              } else if (res.suggestAI) {
-                statusDiv.innerHTML = '<span class="text-warning">⚠️ ' + res.error + '</span>';
-              } else {
-                statusDiv.innerHTML = '<span class="text-danger">❌ ' + (res.error || 'Failed to parse document') + '</span>';
-              }
-              return;
-            }
-            
-            parsedEquipmentItems = res.items || [];
-            
-            if (parsedEquipmentItems.length === 0) {
-              statusDiv.innerHTML = '<span class="text-warning">No equipment items found in the document</span>';
-              return;
-            }
-            
-            statusDiv.innerHTML = '<span class="text-success">✅ ' + res.message + ' (Method: ' + res.method + ')</span>';
-            
-            // Display parsed items
-            listDiv.innerHTML = parsedEquipmentItems.map((item, idx) => \`
-              <div class="flex flex-between flex-center" style="padding:0.5rem;border-bottom:1px solid #262626;">
-                <div>
-                  <input type="checkbox" id="importItem\${idx}" checked style="margin-right:0.5rem;" />
-                  <span class="text-accent">\${item.name}</span>
-                  <span class="text-muted" style="margin-left:1rem;">Rs. \${item.rate}</span>
-                </div>
-                <button onclick="removeFromParsed(\${idx})" class="text-sm text-danger">✕</button>
-              </div>
-            \`).join('');
-            
-            parsedDiv.style.display = 'block';
-            
-          } catch (error) {
-            console.error('Parse error:', error);
-            statusDiv.innerHTML = '<span class="text-danger">❌ Error parsing document: ' + error.message + '</span>';
-          }
-        }
-        
-        function removeFromParsed(idx) {
-          parsedEquipmentItems.splice(idx, 1);
-          const listDiv = document.getElementById('parsedItemsList');
-          if (parsedEquipmentItems.length === 0) {
-            document.getElementById('parsedItems').style.display = 'none';
-            document.getElementById('parseStatus').innerHTML = '<span class="text-muted">All items removed</span>';
-            return;
-          }
-          listDiv.innerHTML = parsedEquipmentItems.map((item, idx) => \`
-            <div class="flex flex-between flex-center" style="padding:0.5rem;border-bottom:1px solid #262626;">
-              <div>
-                <input type="checkbox" id="importItem\${idx}" checked style="margin-right:0.5rem;" />
-                <span class="text-accent">\${item.name}</span>
-                <span class="text-muted" style="margin-left:1rem;">Rs. \${item.rate}</span>
-              </div>
-              <button onclick="removeFromParsed(\${idx})" class="text-sm text-danger">✕</button>
-            </div>
-          \`).join('');
-        }
-        
-        async function importParsedItems() {
-          // Filter to only checked items
-          const itemsToImport = parsedEquipmentItems.filter((_, idx) => {
-            const checkbox = document.getElementById('importItem' + idx);
-            return checkbox && checkbox.checked;
-          });
-          
-          if (itemsToImport.length === 0) {
-            alert('No items selected for import');
-            return;
-          }
-          
-          const statusDiv = document.getElementById('parseStatus');
-          statusDiv.innerHTML = '<span class="text-muted">📥 Importing ' + itemsToImport.length + ' items...</span>';
-          
-          try {
-            const res = await api('/api/equipment/bulk-import', {
-              method: 'POST',
-              body: JSON.stringify({ items: itemsToImport })
-            });
-            
-            if (res.success) {
-              statusDiv.innerHTML = '<span class="text-success">✅ ' + res.message + '</span>';
-              document.getElementById('parsedItems').style.display = 'none';
-              parsedEquipmentItems = [];
-              loadEquipment(); // Refresh the equipment list
-            } else {
-              statusDiv.innerHTML = '<span class="text-danger">❌ ' + (res.error || 'Import failed') + '</span>';
-            }
-          } catch (error) {
-            statusDiv.innerHTML = '<span class="text-danger">❌ Import error: ' + error.message + '</span>';
-          }
-        }
-        
-        async function addEquipment(e) {
-          e.preventDefault();
-          const form = e.target;
-          await api('/api/equipment', {
-            method: 'POST',
-            body: JSON.stringify({
-              name: form.name.value.toUpperCase(),
-              rate: parseInt(form.rate.value)
-            })
-          });
-          form.reset();
-          loadEquipment();
-        }
-        
-        function editEquipment(id) {
-          const eq = state.equipment.find(e => e.id === id);
-          if (!eq) return;
-          
-          const newName = prompt('Equipment Name:', eq.name);
-          if (!newName) return;
-          
-          const newRate = prompt('Rate (Rs.):', eq.rate);
-          if (!newRate) return;
-          
-          api('/api/equipment/' + id, {
-            method: 'PUT',
-            body: JSON.stringify({ name: newName.toUpperCase(), rate: parseInt(newRate) })
-          }).then(() => loadEquipment());
-        }
-        
-        async function deleteEquipment(id) {
-          if (!confirm('Delete this equipment?')) return;
-          await api('/api/equipment/' + id, { method: 'DELETE' });
-          loadEquipment();
-        }
-        
-        // ============================================
-        // SETTINGS MODULE
-        // ============================================
-        let settingsData = { username: '', hasApiKey: false };
-        
-        async function loadSettings() {
-          const res = await api('/api/settings');
-          if (res.success) {
-            settingsData = res.data;
-          }
-          renderSettings();
-        }
-        
-        function renderSettings() {
-          document.getElementById('app').innerHTML = \`
-            <div class="card" style="max-width:600px;">
-              <div class="card-header">⚙️ App Settings</div>
-              <p class="text-sm text-muted mb-2">Manage your login credentials and API keys. Changes take effect immediately.</p>
-              
-              <form id="settingsForm" onsubmit="saveSettings(event)">
-                <div class="mb-2">
-                  <label class="text-sm text-muted">Username</label>
-                  <input type="text" name="newUsername" value="\${settingsData.username || ''}" placeholder="Enter username" />
-                </div>
-                
-                <hr style="border-color:#262626;margin:1.5rem 0;" />
-                
-                <div class="mb-2">
-                  <label class="text-sm text-muted">Current Password <span class="text-danger">*</span></label>
-                  <input type="password" name="currentPassword" required placeholder="Required to save changes" autocomplete="current-password" />
-                </div>
-                
-                <div class="mb-2">
-                  <label class="text-sm text-muted">New Password <span class="text-muted">(optional)</span></label>
-                  <input type="password" name="newPassword" placeholder="Leave blank to keep current" autocomplete="new-password" />
-                </div>
-                
-                <div class="mb-2">
-                  <label class="text-sm text-muted">Confirm New Password</label>
-                  <input type="password" name="confirmPassword" placeholder="Confirm new password" autocomplete="new-password" />
-                </div>
-                
-                <hr style="border-color:#262626;margin:1.5rem 0;" />
-                
-                <div class="mb-2">
-                  <label class="text-sm text-muted">Anthropic API Key</label>
-                  <div class="flex gap-1">
-                    <input type="password" name="anthropicApiKey" id="apiKeyInput"
-                           placeholder="\${settingsData.hasApiKey ? '••••••••••••••••••••••• (key saved)' : 'sk-ant-...'}" 
-                           style="flex:1;" />
-                    <button type="button" onclick="toggleApiKeyVisibility()" style="width:80px;">Show</button>
-                  </div>
-                  <p class="text-sm text-muted" style="margin-top:0.5rem;">
-                    \${settingsData.hasApiKey 
-                      ? '✅ API key is configured. Leave blank to keep current key, or enter new key to replace.'
-                      : '⚠️ No API key configured. Word document AI parsing will not work.'}
-                  </p>
-                </div>
-                
-                <div id="settingsError" class="text-danger text-sm mb-2" style="display:none;"></div>
-                <div id="settingsSuccess" class="text-success text-sm mb-2" style="display:none;"></div>
-                
-                <button type="submit" class="primary" style="width:100%;padding:0.75rem;">Save Settings</button>
-              </form>
-            </div>
-            
-            <div class="card" style="max-width:600px;margin-top:1rem;">
-              <div class="card-header">ℹ️ About Settings</div>
-              <ul class="text-sm text-muted" style="list-style:disc;padding-left:1.5rem;line-height:1.8;">
-                <li>Credentials are stored securely in the database (passwords are hashed)</li>
-                <li>API keys are encrypted before storage</li>
-                <li>If you change your password, you'll need to re-login</li>
-                <li>The Anthropic API key is required for AI-powered Word document parsing</li>
-              </ul>
-            </div>
-          \`;
-        }
-        
-        function toggleApiKeyVisibility() {
-          const input = document.getElementById('apiKeyInput');
-          if (input.type === 'password') {
-            input.type = 'text';
-            event.target.textContent = 'Hide';
-          } else {
-            input.type = 'password';
-            event.target.textContent = 'Show';
-          }
-        }
-        
-        async function saveSettings(e) {
-          e.preventDefault();
-          const form = e.target;
-          const errorDiv = document.getElementById('settingsError');
-          const successDiv = document.getElementById('settingsSuccess');
-          
-          errorDiv.style.display = 'none';
-          successDiv.style.display = 'none';
-          
-          const newPassword = form.newPassword.value;
-          const confirmPassword = form.confirmPassword.value;
-          
-          // Validate passwords match
-          if (newPassword && newPassword !== confirmPassword) {
-            errorDiv.textContent = 'New passwords do not match';
-            errorDiv.style.display = 'block';
-            return;
-          }
-          
-          // Validate password strength
-          if (newPassword && newPassword.length < 6) {
-            errorDiv.textContent = 'New password must be at least 6 characters';
-            errorDiv.style.display = 'block';
-            return;
-          }
-          
-          const data = {
-            currentPassword: form.currentPassword.value,
-            newUsername: form.newUsername.value,
-            newPassword: newPassword || undefined,
-            anthropicApiKey: form.anthropicApiKey.value || undefined
-          };
-          
-          // Don't send empty API key if we're not changing it
-          if (form.anthropicApiKey.value === '') {
-            delete data.anthropicApiKey;
-          }
-          
-          try {
-            const res = await api('/api/settings/update', {
-              method: 'POST',
-              body: JSON.stringify(data)
-            });
-            
-            if (res.success) {
-              if (res.requireRelogin) {
-                alert(res.message);
-                window.location.href = '/login';
-              } else {
-                successDiv.textContent = res.message;
-                successDiv.style.display = 'block';
-                form.currentPassword.value = '';
-                form.newPassword.value = '';
-                form.confirmPassword.value = '';
-                form.anthropicApiKey.value = '';
-                loadSettings();
-              }
-            } else {
-              errorDiv.textContent = res.error || 'Failed to save settings';
-              errorDiv.style.display = 'block';
-            }
-          } catch (err) {
-            errorDiv.textContent = 'Network error';
-            errorDiv.style.display = 'block';
-          }
-        }
-        
-        // ============================================
-        // INIT
-        // ============================================
-        document.addEventListener('click', (e) => {
-          // Close autocomplete dropdowns when clicking outside
-          if (!e.target.closest('.autocomplete')) {
-            document.querySelectorAll('.autocomplete-list').forEach(el => el.style.display = 'none');
-          }
-        });
-        
-        // Load correct module based on tab
-        if (activeTab === 'schedule') loadSchedule();
-        else if (activeTab === 'crew') loadCrew();
-        else if (activeTab === 'quotes') loadQuotes();
-        else if (activeTab === 'equipment') loadEquipment();
-        else if (activeTab === 'settings') loadSettings();
-        else loadSchedule();
-      </script>
+            <hr>
+            <p><strong>Check Safari Console:</strong></p>
+            <p>Right-click → Inspect Element → Console tab</p>
+            <p>You should see messages starting with "✅ TEST"</p>
+        </div>
     </body>
     </html>
-  `;
+  `)
+})
+
+app.get('/', (c) => {
+  // Set Content Security Policy for Safari compatibility and iframe embedding
+  c.header('Content-Security-Policy',
+    "default-src 'self'; " +
+    "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.tailwindcss.com https://cdn.jsdelivr.net https://cdn.sheetjs.com https://api.anthropic.com; " +
+    "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdn.tailwindcss.com; " +
+    "font-src 'self' https://cdn.jsdelivr.net data:; " +
+    "img-src 'self' data: https:; " +
+    "connect-src 'self' https://api.anthropic.com; " +
+    "worker-src 'self' blob:; " +
+    "frame-ancestors 'self' https://ncpa-sound-admin.pages.dev https://*.ncpa-sound-admin.pages.dev;"
+  )
+  
+  return c.html(`
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>NCPA Sound Crew - Event Schedule & Technical Dashboard</title>
+        <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.tailwindcss.com https://cdn.jsdelivr.net https://cdn.sheetjs.com; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdn.tailwindcss.com; font-src 'self' https://cdn.jsdelivr.net data:; img-src 'self' data: https:; connect-src 'self' https://api.anthropic.com;">
+        <script>
+          // Safari compatibility test
+          console.log('🦁 Safari: Page loaded at ' + new Date().toISOString());
+          console.log('🦁 Safari: User Agent:', navigator.userAgent);
+          console.log('🦁 Safari: Testing JavaScript execution...');
+        </script>
+        <script src="https://cdn.tailwindcss.com"></script>
+        <link href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.4.0/css/all.min.css" rel="stylesheet">
+        <style>
+          body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background-color: #FFF8DC;
+          }
+          
+          .tab-active {
+            border-bottom: 3px solid #FF6B35;
+            color: #FF6B35;
+          }
+          
+          .event-card-green {
+            background: #FFFFFF;
+            border-left: 4px solid #28a745;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+          }
+          
+          .event-card-peach {
+            background: #FFFFFF;
+            border-left: 4px solid #FF6B35;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+          }
+          
+          .calendar-day {
+            min-height: 120px;
+            border: 1px solid #E8E8E8;
+            background-color: #FFFFFF;
+          }
+          
+          /* Mobile-optimized event cards */
+          @media (max-width: 768px) {
+            .calendar-day {
+              min-height: 100px;
+            }
+            
+            .event-card-green, .event-card-peach {
+              font-size: 0.75rem;
+              padding: 0.5rem;
+              margin-bottom: 0.25rem;
+            }
+            
+            /* Larger touch targets */
+            button, .event-card-green, .event-card-peach {
+              min-height: 44px;
+            }
+            
+            /* Hide Dashboard tab on mobile */
+            #dashboardTab {
+              display: none !important;
+            }
+            
+            /* More readable event text on mobile */
+            .event-card-green p, .event-card-peach p {
+              line-height: 1.4;
+              margin-bottom: 0.25rem;
+            }
+            
+            /* Better icon spacing on mobile */
+            .event-card-green i, .event-card-peach i {
+              width: 14px;
+              text-align: center;
+            }
+          }
+          
+          .modal {
+            display: none;
+            position: fixed;
+            z-index: 1000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            overflow: auto;
+            background-color: rgba(0,0,0,0.5);
+          }
+          
+          .modal.active {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+          }
+          
+          .modal-content {
+            background-color: #fefefe;
+            padding: 30px;
+            border-radius: 12px;
+            max-width: 700px;
+            width: 90%;
+            max-height: 80vh;
+            overflow-y: auto;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+          }
+          
+          table th {
+            position: sticky;
+            top: 0;
+            background-color: #FF6B35;
+            color: white;
+            z-index: 10;
+          }
+          
+          .editable-cell {
+            cursor: text;
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+          }
+          
+          .editable-cell:hover {
+            background-color: #f0f0f0;
+          }
+          
+          /* Make table cells wrap text instead of expanding */
+          table.table-fixed td {
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+            white-space: normal;
+          }
+          
+          .editable-cell input,
+          .editable-cell textarea {
+            width: 100%;
+            border: 1px solid #ddd;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 14px;
+          }
+          
+          .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid rgba(139, 69, 19, 0.3);
+            border-radius: 50%;
+            border-top-color: #FF6B35;
+            animation: spin 1s ease-in-out infinite;
+          }
+          
+          @keyframes spin {
+            to { transform: rotate(360deg); }
+          }
+          
+          /* Mobile Responsiveness */
+          @media (max-width: 768px) {
+            .container {
+              padding: 1rem !important;
+            }
+            
+            .flex.space-x-3, .flex.space-x-6 {
+              flex-wrap: wrap;
+              gap: 0.5rem;
+            }
+            
+            #searchInput {
+              width: 100% !important;
+              max-width: 200px;
+            }
+            
+            .calendar-day {
+              min-height: 80px !important;
+              font-size: 0.75rem;
+            }
+            
+            .event-card-green, .event-card-peach {
+              padding: 4px !important;
+              margin-bottom: 4px !important;
+            }
+            
+            table {
+              font-size: 0.75rem !important;
+            }
+            
+            .modal-content {
+              width: 95% !important;
+              margin: 1rem;
+              max-height: 90vh !important;
+            }
+            
+            button {
+              font-size: 0.75rem !important;
+              padding: 0.375rem 0.75rem !important;
+            }
+            
+            h1 {
+              font-size: 1.5rem !important;
+            }
+            
+            h2 {
+              font-size: 1.25rem !important;
+            }
+          }
+          
+          @media (max-width: 480px) {
+            .grid {
+              grid-template-columns: 1fr !important;
+            }
+            
+            .hidden-mobile {
+              display: none !important;
+            }
+          }
+        </style>
+    </head>
+    <body style="background-color: #FFF8DC;">
+        <div class="min-h-screen">
+            <!-- Header -->
+            <header class="shadow-md" style="background-color: #FFF8DC; border-bottom: 2px solid #FFE4B5;">
+                <div class="container mx-auto px-6 py-4">
+                    <div class="flex justify-between items-center">
+                        <div class="flex-1"></div>
+                        <div class="flex-1 text-center">
+                            <h1 class="text-3xl font-bold" style="color: #FF6B35;">
+                                <i class="fas fa-music mr-2"></i>
+                                NCPA Sound Crew
+                            </h1>
+                            <p class="text-gray-600 mt-1">Event Schedule & Technical Dashboard</p>
+                        </div>
+                        <div class="flex-1 flex justify-end items-center gap-3">
+                            <!-- User Menu (shown when logged in) -->
+                            <div id="userMenu" style="display: none;">
+                                <div class="relative">
+                                    <button onclick="toggleUserDropdown()" class="flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-yellow-100 transition-all">
+                                        <i class="fas fa-user-circle text-2xl" style="color: #FF6B35;"></i>
+                                        <span id="userEmailDisplay" class="text-sm font-medium text-gray-700"></span>
+                                        <!-- Admin badge -->
+                                        <span id="adminBadge" style="display: none;" class="relative">
+                                            <i class="fas fa-user-shield text-lg text-orange-600"></i>
+                                            <span id="pendingCount" class="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full w-4 h-4 flex items-center justify-center" style="display: none;"></span>
+                                        </span>
+                                    </button>
+                                    <!-- Dropdown -->
+                                    <div id="userDropdown" class="hidden absolute right-0 mt-2 w-48 bg-white rounded-lg shadow-lg border border-gray-200 z-50">
+                                        <button onclick="openChangePasswordModal()" class="w-full text-left px-4 py-2 hover:bg-gray-100 text-sm">
+                                            <i class="fas fa-key mr-2"></i>Change Password
+                                        </button>
+                                        <button id="adminPanelBtn" onclick="openAdminPanel()" class="w-full text-left px-4 py-2 hover:bg-gray-100 text-sm" style="display: none;">
+                                            <i class="fas fa-users-cog mr-2"></i>Admin Panel
+                                        </button>
+                                        <hr class="my-1">
+                                        <button onclick="logout()" class="w-full text-left px-4 py-2 hover:bg-red-50 text-sm text-red-600">
+                                            <i class="fas fa-sign-out-alt mr-2"></i>Logout
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                            <!-- Login Button (shown when not logged in) -->
+                            <button id="loginBtn" onclick="openLoginModal()" class="px-4 py-2 bg-orange-500 text-white rounded-lg hover:bg-orange-600 transition-all">
+                                <i class="fas fa-sign-in-alt mr-2"></i>Login
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </header>
+
+            <!-- Tab Navigation -->
+            <div class="container mx-auto px-4 md:px-6 py-2 md:py-4">
+                <!-- MOBILE: Simple header with Add Show button only -->
+                <div class="md:hidden flex justify-between items-center mb-3">
+                    <div></div>
+                    <!-- Add Show Button (Mobile) -->
+                    <button onclick="openAddShowModal()" class="px-3 py-2 bg-gradient-to-r from-orange-500 to-red-500 text-white rounded-lg text-sm font-semibold shadow-md hover:shadow-lg transition-all">
+                        <i class="fas fa-plus mr-1"></i>Add Show
+                    </button>
+                </div>
+                
+                <!-- MOBILE: Simple search bar only -->
+                <div class="md:hidden mb-3">
+                    <div class="relative">
+                        <input type="text" id="searchInput" placeholder="Search by name, venue, crew..." 
+                               class="w-full px-4 py-2.5 pr-10 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-500 text-sm">
+                        <i class="fas fa-search absolute right-3 top-3 text-gray-400"></i>
+                    </div>
+                </div>
+                
+                <!-- DESKTOP: Full toolbar with all features -->
+                <div class="hidden md:block">
+                    <div class="flex justify-between items-center mb-6">
+                        <div class="flex space-x-6 border-b border-gray-300">
+                            <button id="calendarTab" class="px-4 py-2 font-semibold tab-active transition-all" onclick="showTab('calendar')">
+                                <i class="fas fa-calendar-alt mr-2"></i>Calendar
+                            </button>
+                            <button id="tableTab" class="px-4 py-2 font-semibold text-gray-600 hover:text-gray-800 transition-all" onclick="showTab('table')">
+                                <i class="fas fa-table mr-2"></i>Table
+                            </button>
+                            <button id="crewTab" class="px-4 py-2 font-semibold text-gray-600 hover:text-gray-800 transition-all" onclick="showTab('crew')">
+                                <i class="fas fa-users mr-2"></i>Crew
+                            </button>
+                        </div>
+                        
+                        <!-- Desktop toolbar -->
+                        <div class="flex items-center gap-3">
+                            <!-- Search -->
+                            <div class="relative">
+                                <input type="text" id="searchInput" placeholder="Search events..." 
+                                       class="w-64 px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-500">
+                                <i class="fas fa-search absolute right-3 top-3 text-gray-400"></i>
+                            </div>
+                            
+                            <!-- Divider -->
+                            <div class="h-8 w-px bg-gray-300"></div>
+                            
+                            <!-- Analysis Tools Group -->
+                            <div class="flex gap-2">
+                                <button onclick="toggleFilterPanel()" 
+                                        class="px-3 py-2 text-sm bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-all">
+                                    <i class="fas fa-filter mr-1.5"></i>Filters
+                                </button>
+                                
+                                <button onclick="checkConflicts()" 
+                                        class="px-3 py-2 text-sm bg-red-600 text-white rounded-lg hover:bg-red-700 transition-all">
+                                    <i class="fas fa-exclamation-triangle mr-1.5"></i>Conflicts
+                                </button>
+                                
+                                <button onclick="checkShortNotice()" 
+                                        class="px-3 py-2 text-sm bg-yellow-600 text-white rounded-lg hover:bg-yellow-700 transition-all">
+                                    <i class="fas fa-clock mr-1.5"></i>Short Notice
+                                </button>
+                            </div>
+                            
+                            <!-- Divider -->
+                            <div class="h-8 w-px bg-gray-300"></div>
+                            
+                            <!-- Import/Export Dropdown -->
+                            <div class="relative">
+                                <button onclick="toggleActionsDropdown()" 
+                                        class="px-4 py-2 text-sm bg-gray-700 text-white rounded-lg hover:bg-gray-800 transition-all flex items-center gap-2">
+                                    <i class="fas fa-ellipsis-v"></i>
+                                    <span>More Actions</span>
+                                    <i class="fas fa-chevron-down text-xs"></i>
+                                </button>
+                                
+                                <!-- Dropdown Menu -->
+                                <div id="actionsDropdown" class="hidden absolute right-0 mt-2 w-56 bg-white rounded-lg shadow-lg border border-gray-200 z-50">
+                                    <div class="py-2">
+                                        <!-- Export Section -->
+                                        <div class="px-3 py-1 text-xs font-semibold text-gray-500 uppercase">Export</div>
+                                        <button onclick="openCSVExportModal(); toggleActionsDropdown();" 
+                                                class="w-full text-left px-4 py-2 hover:bg-gray-100 flex items-center gap-3">
+                                            <i class="fas fa-file-csv text-orange-500 w-5"></i>
+                                            <span class="text-sm text-gray-700">Export CSV</span>
+                                        </button>
+                                        <button onclick="openWhatsAppExportModal(); toggleActionsDropdown();" 
+                                                class="w-full text-left px-4 py-2 hover:bg-gray-100 flex items-center gap-3">
+                                            <i class="fab fa-whatsapp text-green-600 w-5"></i>
+                                            <span class="text-sm text-gray-700">WhatsApp Export</span>
+                                        </button>
+                                        
+                                        <!-- Divider -->
+                                        <div class="my-2 border-t border-gray-200"></div>
+                                        
+                                        <!-- Import Section -->
+                                        <div class="px-3 py-1 text-xs font-semibold text-gray-500 uppercase">Import</div>
+                                        <button onclick="document.getElementById('wordInput').click(); toggleActionsDropdown();" 
+                                                class="w-full text-left px-4 py-2 hover:bg-gray-100 flex items-center gap-3">
+                                            <i class="fas fa-file-word text-blue-600 w-5"></i>
+                                            <span class="text-sm text-gray-700">Upload Word</span>
+                                        </button>
+                                        <button onclick="document.getElementById('csvInput').click(); toggleActionsDropdown();" 
+                                                class="w-full text-left px-4 py-2 hover:bg-gray-100 flex items-center gap-3">
+                                            <i class="fas fa-file-upload text-teal-600 w-5"></i>
+                                            <span class="text-sm text-gray-700">Upload CSV</span>
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <!-- Hidden file inputs -->
+                            <input type="file" id="wordInput" accept=".doc,.docx" style="display: none;" onchange="handleWordUpload(event)">
+                            <input type="file" id="csvInput" accept=".csv" style="display: none;" onchange="handleCSVUpload(event)">
+                            
+                            <!-- Add Show Button -->
+                            <button onclick="openAddShowModal()" 
+                                class="px-3 py-2 text-sm text-white rounded-lg hover:opacity-90 transition-all" 
+                                style="background-color: #FF6B35;">
+                                <i class="fas fa-plus mr-1.5"></i>Add Show
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Calendar View -->
+                <div id="calendarView" class="rounded-lg p-3 md:p-6" style="background-color: #FFFFFF;">
+                    <!-- Calendar controls with event count -->
+                    <div class="flex justify-between items-center mb-4 md:mb-6">
+                        <button onclick="changeMonth(-1)" class="px-3 py-2 text-sm md:text-base rounded-lg touch-manipulation" style="background-color: #FFE4B5; color: #8B4513;">
+                            <i class="fas fa-chevron-left"></i><span class="hidden md:inline"> Previous</span>
+                        </button>
+                        <div class="text-center">
+                            <h2 id="currentMonthYear" class="text-lg md:text-2xl font-bold" style="color: #FF6B35;"></h2>
+                            <p id="monthEventCount" class="text-sm text-gray-600 mt-1"></p>
+                        </div>
+                        <button onclick="changeMonth(1)" class="px-3 py-2 text-sm md:text-base rounded-lg touch-manipulation" style="background-color: #FFE4B5; color: #8B4513;">
+                            <span class="hidden md:inline">Next </span><i class="fas fa-chevron-right"></i>
+                        </button>
+                    </div>
+                    
+                    <!-- Calendar grid - Mobile optimized -->
+                    <div class="grid grid-cols-7 gap-1 md:gap-2">
+                        <div class="font-bold text-center py-1.5 md:py-2 text-xs md:text-sm" style="background-color: #FFF8DC; color: #8B4513;">SUN</div>
+                        <div class="font-bold text-center py-1.5 md:py-2 text-xs md:text-sm" style="background-color: #FFF8DC; color: #8B4513;">MON</div>
+                        <div class="font-bold text-center py-1.5 md:py-2 text-xs md:text-sm" style="background-color: #FFF8DC; color: #8B4513;">TUE</div>
+                        <div class="font-bold text-center py-1.5 md:py-2 text-xs md:text-sm" style="background-color: #FFF8DC; color: #8B4513;">WED</div>
+                        <div class="font-bold text-center py-1.5 md:py-2 text-xs md:text-sm" style="background-color: #FFF8DC; color: #8B4513;">THU</div>
+                        <div class="font-bold text-center py-1.5 md:py-2 text-xs md:text-sm" style="background-color: #FFF8DC; color: #8B4513;">FRI</div>
+                        <div class="font-bold text-center py-1.5 md:py-2 text-xs md:text-sm" style="background-color: #FFF8DC; color: #8B4513;">SAT</div>
+                    </div>
+                    <div id="calendarGrid" class="grid grid-cols-7 gap-1 md:gap-2 mt-2"></div>
+                </div>
+
+                <!-- Table View -->
+                <div id="tableView" class="bg-white rounded-lg shadow-lg p-3 md:p-6" style="display: none;">
+                    <!-- Bulk Actions Bar -->
+                    <div class="mb-4 flex items-center justify-between">
+                        <div class="flex items-center space-x-3">
+                            <select id="bulkDeleteMonth" class="px-3 py-1.5 text-sm border border-gray-300 rounded-lg">
+                                <option value="">Select Month</option>
+                                <option value="1">January</option>
+                                <option value="2">February</option>
+                                <option value="3">March</option>
+                                <option value="4">April</option>
+                                <option value="5">May</option>
+                                <option value="6">June</option>
+                                <option value="7">July</option>
+                                <option value="8">August</option>
+                                <option value="9">September</option>
+                                <option value="10">October</option>
+                                <option value="11">November</option>
+                                <option value="12">December</option>
+                            </select>
+                            <select id="bulkDeleteYear" class="px-3 py-1.5 text-sm border border-gray-300 rounded-lg">
+                                <option value="">Select Year</option>
+                                <option value="2024">2024</option>
+                                <option value="2025">2025</option>
+                                <option value="2026">2026</option>
+                            </select>
+                            <button onclick="bulkDeleteEvents()" class="px-3 py-1.5 text-sm bg-red-600 text-white rounded-lg hover:bg-red-700 transition-all flex items-center">
+                                <i class="fas fa-trash mr-1.5"></i>Delete Month
+                            </button>
+                        </div>
+                        <div id="bulkDeleteStatus" class="text-sm text-gray-600"></div>
+                    </div>
+                    
+                    <div class="overflow-auto" style="max-height: 70vh;">
+                        <table class="w-full border-collapse table-fixed">
+                            <colgroup>
+                                <col style="width: 5%;">   <!-- Select -->
+                                <col style="width: 10%;">  <!-- Date -->
+                                <col style="width: 23%;">  <!-- Program -->
+                                <col style="width: 10%;">  <!-- Venue -->
+                                <col style="width: 10%;">  <!-- Team -->
+                                <col style="width: 18%;">  <!-- Sound Requirements -->
+                                <col style="width: 8%;">   <!-- Call Time -->
+                                <col style="width: 10%;">  <!-- Crew -->
+                                <col style="width: 6%;">   <!-- Actions -->
+                            </colgroup>
+                            <thead>
+                                <tr style="background-color: #FF6B35;">
+                                    <th class="px-2 py-3 text-center text-white font-semibold text-sm">
+                                        <input type="checkbox" id="selectAllCheckbox" onchange="toggleSelectAll(this.checked)" 
+                                               class="cursor-pointer">
+                                    </th>
+                                    <th class="px-2 py-3 text-left text-white font-semibold text-sm">Date</th>
+                                    <th class="px-2 py-3 text-left text-white font-semibold text-sm">Program/Event</th>
+                                    <th class="px-2 py-3 text-left text-white font-semibold text-sm">Venue</th>
+                                    <th class="px-2 py-3 text-left text-white font-semibold text-sm">Team</th>
+                                    <th class="px-2 py-3 text-left text-white font-semibold text-sm">Sound Req</th>
+                                    <th class="px-2 py-3 text-left text-white font-semibold text-sm">Call</th>
+                                    <th class="px-2 py-3 text-left text-white font-semibold text-sm">Crew</th>
+                                    <th class="px-2 py-3 text-left text-white font-semibold text-sm">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="tableBody">
+                                <!-- Table rows will be dynamically generated -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                
+                <!-- Dashboard View -->
+                <!-- Dashboard removed - using simple event count in calendar header instead -->
+                
+                <!-- Crew Tab -->
+                <div id="crewView" class="bg-white rounded-lg shadow-lg p-6" style="display: none;">
+                    <div id="crewContent">
+                        <div class="text-center py-12">
+                            <i class="fas fa-spinner fa-spin text-4xl text-gray-400"></i>
+                            <p class="mt-4 text-gray-600">Loading crew statistics...</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Event Detail Modal -->
+        <div id="eventModal" class="modal">
+            <div class="modal-content">
+                <div class="flex justify-between items-center mb-4">
+                    <h2 class="text-2xl font-bold" style="color: #FF6B35;">Event Details</h2>
+                    <button onclick="closeEventModal()" class="text-gray-500 hover:text-gray-700 text-2xl">&times;</button>
+                </div>
+                <div id="eventModalContent"></div>
+            </div>
+        </div>
+
+        <!-- Add Show Modal -->
+        <div id="addShowModal" class="modal">
+            <div class="modal-content">
+                <div class="flex justify-between items-center mb-4">
+                    <h2 class="text-2xl font-bold" style="color: #FF6B35;">Add New Show</h2>
+                    <button onclick="closeAddShowModal()" class="text-gray-500 hover:text-gray-700 text-2xl">&times;</button>
+                </div>
+                <form id="addShowForm" onsubmit="handleAddShow(event)">
+                    <div class="space-y-4">
+                        <!-- Date Type Selection -->
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-2">Event Duration *</label>
+                            <div class="flex space-x-4">
+                                <label class="flex items-center cursor-pointer">
+                                    <input type="radio" name="dateType" value="single" checked onchange="toggleDateFields()" 
+                                           class="mr-2">
+                                    <span class="text-sm">Single Date</span>
+                                </label>
+                                <label class="flex items-center cursor-pointer">
+                                    <input type="radio" name="dateType" value="multiple" onchange="toggleDateFields()" 
+                                           class="mr-2">
+                                    <span class="text-sm">Multiple Dates (Same show across dates)</span>
+                                </label>
+                            </div>
+                        </div>
+                        
+                        <!-- Single Date Field -->
+                        <div id="singleDateField">
+                            <label class="block text-sm font-medium text-gray-700 mb-1">Date *</label>
+                            <input type="date" name="event_date" id="singleDate"
+                                   class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-600">
+                        </div>
+                        
+                        <!-- Multiple Date Fields -->
+                        <div id="multipleDateFields" style="display: none;">
+                            <div class="grid grid-cols-2 gap-4">
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-1">Start Date *</label>
+                                    <input type="date" name="start_date" id="startDate"
+                                           class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-600">
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-1">End Date *</label>
+                                    <input type="date" name="end_date" id="endDate"
+                                           class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-600">
+                                </div>
+                            </div>
+                            <p class="text-xs text-gray-500 mt-1">
+                                <i class="fas fa-info-circle mr-1"></i>
+                                Same show will be created for all dates in this range with identical venue, crew, and requirements.
+                            </p>
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">Program/Event *</label>
+                            <input type="text" name="program" required 
+                                   class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-600">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">Venue *</label>
+                            <input type="text" name="venue" required list="venueList"
+                                   class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-600"
+                                   placeholder="Select or type venue">
+                            <datalist id="venueList">
+                                <option value="JBT">Jamshed Bhabha Theatre</option>
+                                <option value="TET">Tata Theatre</option>
+                                <option value="GDT">Godrej Dance Theatre</option>
+                                <option value="LT">Little Theatre</option>
+                                <option value="SVR">Sea View Room</option>
+                                <option value="TT">Tata Theatre</option>
+                                <option value="Experimental Theatre">Experimental Theatre</option>
+                            </datalist>
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">Team (curator)</label>
+                            <select name="team" id="editTeam"
+                                   class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-600">
+                                <option value="">Select Team...</option>
+                                <option value="Bruce/Team">Bruce/Team</option>
+                                <option value="Dr.Rao/Team">Dr.Rao/Team</option>
+                                <option value="Dr.Swapno/Team">Dr.Swapno/Team</option>
+                                <option value="Farrahnaz/Team">Farrahnaz/Team</option>
+                                <option value="Bianca/Team">Bianca/Team</option>
+                                <option value="Dr.Sujata/Team">Dr.Sujata/Team</option>
+                                <option value="Nooshin/Team">Nooshin/Team</option>
+                                <option value="DPAG">DPAG</option>
+                                <option value="DP">DP</option>
+                                <option value="Others">Others</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">Sound Requirements</label>
+                            <textarea name="sound_requirements" rows="3" 
+                                      class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-600"></textarea>
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">Call Time</label>
+                            <input type="text" name="call_time" 
+                                   class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-600">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-2">Crew (sound team) - Select Multiple</label>
+                            <div class="grid grid-cols-3 gap-2 p-3 border border-gray-300 rounded-lg bg-gray-50 max-h-48 overflow-y-auto">
+                                <label class="flex items-center space-x-2 cursor-pointer hover:bg-gray-100 p-1 rounded">
+                                    <input type="checkbox" name="crew[]" value="Ashwin" class="add-crew-checkbox">
+                                    <span class="text-sm">Ashwin</span>
+                                </label>
+                                <label class="flex items-center space-x-2 cursor-pointer hover:bg-gray-100 p-1 rounded">
+                                    <input type="checkbox" name="crew[]" value="Naren" class="add-crew-checkbox">
+                                    <span class="text-sm">Naren</span>
+                                </label>
+                                <label class="flex items-center space-x-2 cursor-pointer hover:bg-gray-100 p-1 rounded">
+                                    <input type="checkbox" name="crew[]" value="Sandeep" class="add-crew-checkbox">
+                                    <span class="text-sm">Sandeep</span>
+                                </label>
+                                <label class="flex items-center space-x-2 cursor-pointer hover:bg-gray-100 p-1 rounded">
+                                    <input type="checkbox" name="crew[]" value="Coni" class="add-crew-checkbox">
+                                    <span class="text-sm">Coni</span>
+                                </label>
+                                <label class="flex items-center space-x-2 cursor-pointer hover:bg-gray-100 p-1 rounded">
+                                    <input type="checkbox" name="crew[]" value="Nikhil" class="add-crew-checkbox">
+                                    <span class="text-sm">Nikhil</span>
+                                </label>
+                                <label class="flex items-center space-x-2 cursor-pointer hover:bg-gray-100 p-1 rounded">
+                                    <input type="checkbox" name="crew[]" value="NS" class="add-crew-checkbox">
+                                    <span class="text-sm">NS</span>
+                                </label>
+                                <label class="flex items-center space-x-2 cursor-pointer hover:bg-gray-100 p-1 rounded">
+                                    <input type="checkbox" name="crew[]" value="Aditya" class="add-crew-checkbox">
+                                    <span class="text-sm">Aditya</span>
+                                </label>
+                                <label class="flex items-center space-x-2 cursor-pointer hover:bg-gray-100 p-1 rounded">
+                                    <input type="checkbox" name="crew[]" value="Viraj" class="add-crew-checkbox">
+                                    <span class="text-sm">Viraj</span>
+                                </label>
+                                <label class="flex items-center space-x-2 cursor-pointer hover:bg-gray-100 p-1 rounded">
+                                    <input type="checkbox" name="crew[]" value="Shridhar" class="add-crew-checkbox">
+                                    <span class="text-sm">Shridhar</span>
+                                </label>
+                                <label class="flex items-center space-x-2 cursor-pointer hover:bg-gray-100 p-1 rounded">
+                                    <input type="checkbox" name="crew[]" value="Nazar" class="add-crew-checkbox">
+                                    <span class="text-sm">Nazar</span>
+                                </label>
+                                <label class="flex items-center space-x-2 cursor-pointer hover:bg-gray-100 p-1 rounded">
+                                    <input type="checkbox" name="crew[]" value="Omkar" class="add-crew-checkbox">
+                                    <span class="text-sm">Omkar</span>
+                                </label>
+                                <label class="flex items-center space-x-2 cursor-pointer hover:bg-gray-100 p-1 rounded">
+                                    <input type="checkbox" name="crew[]" value="Akshay" class="add-crew-checkbox">
+                                    <span class="text-sm">Akshay</span>
+                                </label>
+                                <label class="flex items-center space-x-2 cursor-pointer hover:bg-gray-100 p-1 rounded">
+                                    <input type="checkbox" name="crew[]" value="OC1" class="add-crew-checkbox">
+                                    <span class="text-sm">OC1</span>
+                                </label>
+                                <label class="flex items-center space-x-2 cursor-pointer hover:bg-gray-100 p-1 rounded">
+                                    <input type="checkbox" name="crew[]" value="OC2" class="add-crew-checkbox">
+                                    <span class="text-sm">OC2</span>
+                                </label>
+                                <label class="flex items-center space-x-2 cursor-pointer hover:bg-gray-100 p-1 rounded">
+                                    <input type="checkbox" name="crew[]" value="OC3" class="add-crew-checkbox">
+                                    <span class="text-sm">OC3</span>
+                                </label>
+                            </div>
+                            <input type="text" id="addCrewCustom" placeholder="Or type custom crew name (comma-separated for multiple)" 
+                                   class="w-full mt-2 px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-600 text-sm">
+                            <p class="text-xs text-gray-500 mt-1">
+                                <i class="fas fa-info-circle mr-1"></i>
+                                Select multiple crew members or add custom names below
+                            </p>
+                        </div>
+                    </div>
+                    <div class="flex justify-end space-x-3 mt-6">
+                        <button type="button" onclick="closeAddShowModal()" 
+                                class="px-6 py-2 bg-gray-300 text-gray-700 rounded-lg hover:bg-gray-400">
+                            Cancel
+                        </button>
+                        <button type="submit" 
+                                class="px-6 py-2 text-white rounded-lg hover:opacity-90" 
+                                style="background-color: #FF6B35;">
+                            Add Show
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- Edit Event Modal -->
+        <div id="editEventModal" class="modal">
+            <div class="modal-content">
+                <div class="flex justify-between items-center mb-4">
+                    <h2 class="text-2xl font-bold" style="color: #FF6B35;">Edit Event</h2>
+                    <button onclick="closeEditEventModal()" class="text-gray-500 hover:text-gray-700 text-2xl">&times;</button>
+                </div>
+                <form id="editEventForm" onsubmit="handleEditEvent(event)">
+                    <input type="hidden" name="event_id" id="editEventId">
+                    <div class="space-y-4">
+                        <!-- Date Type Selection -->
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-2">Event Duration *</label>
+                            <div class="flex space-x-4">
+                                <label class="flex items-center cursor-pointer">
+                                    <input type="radio" name="editDateType" value="single" checked onchange="toggleEditDateFields()" 
+                                           class="mr-2">
+                                    <span class="text-sm">Single Date</span>
+                                </label>
+                                <label class="flex items-center cursor-pointer">
+                                    <input type="radio" name="editDateType" value="multiple" onchange="toggleEditDateFields()" 
+                                           class="mr-2">
+                                    <span class="text-sm">Extend to Multiple Dates</span>
+                                </label>
+                            </div>
+                        </div>
+                        
+                        <!-- Single Date Field -->
+                        <div id="editSingleDateField">
+                            <label class="block text-sm font-medium text-gray-700 mb-1">Date *</label>
+                            <input type="date" name="event_date" id="editSingleDate"
+                                   class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-600">
+                        </div>
+                        
+                        <!-- Multiple Date Fields -->
+                        <div id="editMultipleDateFields" style="display: none;">
+                            <div class="grid grid-cols-2 gap-4">
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-1">Start Date *</label>
+                                    <input type="date" name="start_date" id="editStartDate"
+                                           class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-600">
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-1">End Date *</label>
+                                    <input type="date" name="end_date" id="editEndDate"
+                                           class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-600">
+                                </div>
+                            </div>
+                            <p class="text-xs text-gray-500 mt-1">
+                                <i class="fas fa-info-circle mr-1"></i>
+                                Creates copies of this event for additional dates. Original event will be updated to start date.
+                            </p>
+                        </div>
+                        
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">Program/Event *</label>
+                            <input type="text" name="program" id="editProgram" required 
+                                   class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-600">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">Venue *</label>
+                            <input type="text" name="venue" id="editVenue" required list="venueList"
+                                   class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-600"
+                                   placeholder="Select or type venue">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">Team (curator)</label>
+                            <select name="team" id="editTeam"
+                                   class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-600">
+                                <option value="">Select Team...</option>
+                                <option value="Bruce/Team">Bruce/Team</option>
+                                <option value="Dr.Rao/Team">Dr.Rao/Team</option>
+                                <option value="Dr.Swapno/Team">Dr.Swapno/Team</option>
+                                <option value="Farrahnaz/Team">Farrahnaz/Team</option>
+                                <option value="Bianca/Team">Bianca/Team</option>
+                                <option value="Dr.Sujata/Team">Dr.Sujata/Team</option>
+                                <option value="Nooshin/Team">Nooshin/Team</option>
+                                <option value="DPAG">DPAG</option>
+                                <option value="DP">DP</option>
+                                <option value="Others">Others</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">Sound Requirements</label>
+                            <textarea name="sound_requirements" id="editSoundReq" rows="3" 
+                                      class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-600"></textarea>
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">Call Time</label>
+                            <input type="text" name="call_time" id="editCallTime"
+                                   class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-600">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-2">Crew (sound team) - Select Multiple</label>
+                            <div class="grid grid-cols-3 gap-2 p-3 border border-gray-300 rounded-lg bg-gray-50 max-h-48 overflow-y-auto">
+                                <label class="flex items-center space-x-2 cursor-pointer hover:bg-gray-100 p-1 rounded">
+                                    <input type="checkbox" name="crew[]" value="Ashwin" class="crew-checkbox">
+                                    <span class="text-sm">Ashwin</span>
+                                </label>
+                                <label class="flex items-center space-x-2 cursor-pointer hover:bg-gray-100 p-1 rounded">
+                                    <input type="checkbox" name="crew[]" value="Naren" class="crew-checkbox">
+                                    <span class="text-sm">Naren</span>
+                                </label>
+                                <label class="flex items-center space-x-2 cursor-pointer hover:bg-gray-100 p-1 rounded">
+                                    <input type="checkbox" name="crew[]" value="Sandeep" class="crew-checkbox">
+                                    <span class="text-sm">Sandeep</span>
+                                </label>
+                                <label class="flex items-center space-x-2 cursor-pointer hover:bg-gray-100 p-1 rounded">
+                                    <input type="checkbox" name="crew[]" value="Coni" class="crew-checkbox">
+                                    <span class="text-sm">Coni</span>
+                                </label>
+                                <label class="flex items-center space-x-2 cursor-pointer hover:bg-gray-100 p-1 rounded">
+                                    <input type="checkbox" name="crew[]" value="Nikhil" class="crew-checkbox">
+                                    <span class="text-sm">Nikhil</span>
+                                </label>
+                                <label class="flex items-center space-x-2 cursor-pointer hover:bg-gray-100 p-1 rounded">
+                                    <input type="checkbox" name="crew[]" value="NS" class="crew-checkbox">
+                                    <span class="text-sm">NS</span>
+                                </label>
+                                <label class="flex items-center space-x-2 cursor-pointer hover:bg-gray-100 p-1 rounded">
+                                    <input type="checkbox" name="crew[]" value="Aditya" class="crew-checkbox">
+                                    <span class="text-sm">Aditya</span>
+                                </label>
+                                <label class="flex items-center space-x-2 cursor-pointer hover:bg-gray-100 p-1 rounded">
+                                    <input type="checkbox" name="crew[]" value="Viraj" class="crew-checkbox">
+                                    <span class="text-sm">Viraj</span>
+                                </label>
+                                <label class="flex items-center space-x-2 cursor-pointer hover:bg-gray-100 p-1 rounded">
+                                    <input type="checkbox" name="crew[]" value="Shridhar" class="crew-checkbox">
+                                    <span class="text-sm">Shridhar</span>
+                                </label>
+                                <label class="flex items-center space-x-2 cursor-pointer hover:bg-gray-100 p-1 rounded">
+                                    <input type="checkbox" name="crew[]" value="Nazar" class="crew-checkbox">
+                                    <span class="text-sm">Nazar</span>
+                                </label>
+                                <label class="flex items-center space-x-2 cursor-pointer hover:bg-gray-100 p-1 rounded">
+                                    <input type="checkbox" name="crew[]" value="Omkar" class="crew-checkbox">
+                                    <span class="text-sm">Omkar</span>
+                                </label>
+                                <label class="flex items-center space-x-2 cursor-pointer hover:bg-gray-100 p-1 rounded">
+                                    <input type="checkbox" name="crew[]" value="Akshay" class="crew-checkbox">
+                                    <span class="text-sm">Akshay</span>
+                                </label>
+                                <label class="flex items-center space-x-2 cursor-pointer hover:bg-gray-100 p-1 rounded">
+                                    <input type="checkbox" name="crew[]" value="OC1" class="crew-checkbox">
+                                    <span class="text-sm">OC1</span>
+                                </label>
+                                <label class="flex items-center space-x-2 cursor-pointer hover:bg-gray-100 p-1 rounded">
+                                    <input type="checkbox" name="crew[]" value="OC2" class="crew-checkbox">
+                                    <span class="text-sm">OC2</span>
+                                </label>
+                                <label class="flex items-center space-x-2 cursor-pointer hover:bg-gray-100 p-1 rounded">
+                                    <input type="checkbox" name="crew[]" value="OC3" class="crew-checkbox">
+                                    <span class="text-sm">OC3</span>
+                                </label>
+                            </div>
+                            <input type="text" id="editCrewCustom" placeholder="Or type custom crew name" 
+                                   class="w-full mt-2 px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-600 text-sm">
+                            <p class="text-xs text-gray-500 mt-1">
+                                <i class="fas fa-info-circle mr-1"></i>
+                                Select multiple crew or enter custom names. Selected crew will be joined with commas.
+                            </p>
+                        </div>
+                    </div>
+                    <div class="flex justify-end space-x-3 mt-6">
+                        <button type="button" onclick="closeEditEventModal()" 
+                                class="px-6 py-2 bg-gray-300 text-gray-700 rounded-lg hover:bg-gray-400">
+                            Cancel
+                        </button>
+                        <button type="submit" 
+                                class="px-6 py-2 text-white rounded-lg hover:opacity-90" 
+                                style="background-color: #FF6B35;">
+                            Save Changes
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- Delete Confirmation Modal -->
+        <div id="deleteConfirmModal" class="modal">
+            <div class="modal-content" style="max-width: 400px;">
+                <h2 class="text-xl font-bold mb-4" style="color: #FF6B35;">Delete Event</h2>
+                <p class="text-gray-700 mb-6" id="deleteConfirmMessage">Are you sure you want to delete this event?</p>
+                <div class="flex justify-end space-x-3">
+                    <button onclick="closeDeleteConfirm()" 
+                            class="px-6 py-2 bg-gray-300 text-gray-700 rounded-lg hover:bg-gray-400">
+                        Cancel
+                    </button>
+                    <button id="deleteConfirmBtn" 
+                            class="px-6 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700">
+                        Delete
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- WhatsApp Export Modal -->
+        <div id="whatsappExportModal" class="modal">
+            <div class="modal-content" style="max-width: 600px;">
+                <div class="flex justify-between items-center mb-4">
+                    <h2 class="text-2xl font-bold" style="color: #FF6B35;">
+                        <i class="fab fa-whatsapp mr-2"></i>Export for WhatsApp
+                    </h2>
+                    <button onclick="closeWhatsAppExportModal()" class="text-gray-500 hover:text-gray-700 text-2xl">&times;</button>
+                </div>
+                
+                <div class="space-y-4 mb-6">
+                    <p class="text-gray-600">Select a time range to export events:</p>
+                    <div class="grid grid-cols-2 gap-3">
+                        <button onclick="exportTomorrow()" class="px-4 py-3 bg-orange-500 text-white rounded-lg hover:bg-orange-600 transition-all">
+                            <i class="fas fa-calendar-day mr-2"></i>Tomorrow
+                        </button>
+                        <button onclick="exportThisWeek()" class="px-4 py-3 bg-orange-500 text-white rounded-lg hover:bg-orange-600 transition-all">
+                            <i class="fas fa-calendar-week mr-2"></i>This Week
+                        </button>
+                        <button onclick="exportNextWeek()" class="px-4 py-3 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-all">
+                            <i class="fas fa-calendar-plus mr-2"></i>Next Week
+                        </button>
+                        <button onclick="exportCustomDate()" class="px-4 py-3 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition-all">
+                            <i class="fas fa-calendar-alt mr-2"></i>Custom Date
+                        </button>
+                    </div>
+                </div>
+                
+                <div id="customDatePicker" style="display: none;" class="mb-6">
+                    <label class="block text-sm font-medium text-gray-700 mb-2">Select Date:</label>
+                    <input type="date" id="customDateInput" class="w-full px-4 py-2 border border-gray-300 rounded-lg">
+                    <button onclick="exportSelectedDate()" class="mt-3 w-full px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700">
+                        Generate Export
+                    </button>
+                </div>
+                
+                <div id="exportPreview" style="display: none;">
+                    <div class="flex justify-between items-center mb-3">
+                        <h3 class="font-semibold text-gray-700">Preview:</h3>
+                        <button onclick="copyToClipboard()" class="px-4 py-2 bg-orange-500 text-white rounded-lg hover:bg-orange-600">
+                            <i class="fas fa-copy mr-2"></i>Copy to Clipboard
+                        </button>
+                    </div>
+                    <textarea id="exportText" readonly class="w-full h-64 p-4 border border-gray-300 rounded-lg bg-gray-50 font-mono text-sm"></textarea>
+                </div>
+            </div>
+        </div>
+
+        <!-- CSV Export Modal -->
+        <div id="csvExportModal" class="modal">
+            <div class="modal-content" style="max-width: 500px;">
+                <div class="flex justify-between items-center mb-4">
+                    <h2 class="text-2xl font-bold" style="color: #FF6B35;">
+                        <i class="fas fa-file-download mr-2"></i>Export Events
+                    </h2>
+                    <button onclick="closeCSVExportModal()" class="text-gray-500 hover:text-gray-700 text-2xl">&times;</button>
+                </div>
+                
+                <div class="space-y-4">
+                    <p class="text-gray-600">Select month to export:</p>
+                    
+                    <div class="grid grid-cols-1 gap-3">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-2">Month:</label>
+                            <select id="csvExportMonth" class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-500">
+                                <option value="1">January</option>
+                                <option value="2">February</option>
+                                <option value="3">March</option>
+                                <option value="4">April</option>
+                                <option value="5">May</option>
+                                <option value="6">June</option>
+                                <option value="7">July</option>
+                                <option value="8">August</option>
+                                <option value="9">September</option>
+                                <option value="10">October</option>
+                                <option value="11">November</option>
+                                <option value="12">December</option>
+                            </select>
+                        </div>
+                        
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-2">Year:</label>
+                            <select id="csvExportYear" class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-500">
+                                <option value="2024">2024</option>
+                                <option value="2025" selected>2025</option>
+                                <option value="2026">2026</option>
+                            </select>
+                        </div>
+                    </div>
+                    
+                    <div class="space-y-2">
+                        <p class="text-sm font-medium text-gray-700 mb-2">Export Format:</p>
+                        <div class="grid grid-cols-3 gap-2">
+                            <button onclick="generateCSVExport()" 
+                                    class="px-3 py-2.5 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition-all text-sm">
+                                <i class="fas fa-file-csv mr-1"></i>CSV
+                            </button>
+                            <button onclick="generateExcelExport()" 
+                                    class="px-3 py-2.5 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-all text-sm">
+                                <i class="fas fa-file-excel mr-1"></i>Excel
+                            </button>
+                            <button onclick="generateICalendarExport()" 
+                                    class="px-3 py-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-all text-sm">
+                                <i class="fas fa-calendar mr-1"></i>Calendar
+                            </button>
+                        </div>
+                        <p class="text-xs text-gray-500 mt-2">
+                            <i class="fas fa-info-circle mr-1"></i>
+                            Use <strong>Calendar</strong> (.ics) for Google Calendar, Apple Calendar, Outlook
+                        </p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- AI Assistant Floating Button -->
+        <button id="aiAssistantBtn" onclick="toggleAIAssistant()" 
+                class="fixed bottom-6 right-6 w-14 h-14 bg-gradient-to-r from-purple-600 to-indigo-600 text-white rounded-full shadow-lg hover:shadow-xl transition-all flex items-center justify-center z-40">
+            <i class="fas fa-robot text-xl"></i>
+        </button>
+
+        <!-- AI Assistant Modal -->
+        <div id="aiAssistantModal" class="modal">
+            <div class="modal-content" style="max-width: 700px;">
+                <div class="flex justify-between items-center mb-4">
+                    <h2 class="text-2xl font-bold" style="color: #FF6B35;">
+                        <i class="fas fa-robot mr-2"></i>AI Assistant
+                    </h2>
+                    <button onclick="closeAIAssistant()" class="text-gray-500 hover:text-gray-700 text-2xl">&times;</button>
+                </div>
+                
+                <div class="mb-6">
+                    <p class="text-gray-600 mb-4">Ask me anything about your events! Try these examples:</p>
+                    <div class="grid grid-cols-2 gap-2 mb-4">
+                        <button onclick="askAI('Show all events tomorrow')" class="px-3 py-2 text-sm bg-orange-50 text-orange-700 rounded-lg hover:bg-orange-100 text-left">
+                            📅 Events tomorrow
+                        </button>
+                        <button onclick="askAI('Events at Tata Theatre this month')" class="px-3 py-2 text-sm bg-orange-50 text-orange-700 rounded-lg hover:bg-orange-100 text-left">
+                            🏛️ Events at Tata Theatre
+                        </button>
+                        <button onclick="askAI('Events with missing sound requirements')" class="px-3 py-2 text-sm bg-yellow-50 text-yellow-700 rounded-lg hover:bg-yellow-100 text-left">
+                            ⚠️ Missing requirements
+                        </button>
+                        <button onclick="askAI('Events assigned to Ashwin')" class="px-3 py-2 text-sm bg-purple-50 text-purple-700 rounded-lg hover:bg-purple-100 text-left">
+                            👤 Ashwin's events
+                        </button>
+                    </div>
+                    
+                    <div class="flex space-x-2">
+                        <input type="text" id="aiQueryInput" placeholder="Ask about events..." 
+                               class="flex-1 px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-600"
+                               onkeypress="if(event.key==='Enter') askAI()">
+                        <button onclick="askAI()" class="px-6 py-3 bg-purple-600 text-white rounded-lg hover:bg-purple-700">
+                            <i class="fas fa-paper-plane"></i>
+                        </button>
+                    </div>
+                </div>
+                
+                <div id="aiResponse" style="display: none;">
+                    <div class="bg-gray-50 rounded-lg p-4 mb-4">
+                        <div class="flex items-center mb-2">
+                            <div class="loading mr-2" id="aiLoading" style="display: none;"></div>
+                            <h3 class="font-semibold text-gray-700">Response:</h3>
+                        </div>
+                        <p id="aiExplanation" class="text-gray-600 mb-3"></p>
+                        <div id="aiResultsContainer" class="overflow-x-auto"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <script>
+          // Early Safari test - runs before any libraries load
+          console.log('🔍 Early test: JavaScript is running!');
+          console.log('🔍 Browser:', navigator.userAgent.includes('Safari') ? 'Safari' : 'Other');
+          
+          // Test if we can access basic DOM
+          document.addEventListener('DOMContentLoaded', function() {
+            console.log('✅ DOMContentLoaded fired successfully');
+            console.log('✅ Body element:', document.body ? 'Found' : 'Not found');
+          });
+        </script>
+        <script src="https://cdn.jsdelivr.net/npm/axios@1.6.0/dist/axios.min.js" crossorigin="anonymous"></script>
+        <!-- Login Modal -->
+        <div id="loginModal" class="modal">
+            <div class="modal-content max-w-md">
+                <div class="flex justify-between items-center mb-4">
+                    <h2 class="text-2xl font-bold" style="color: #FF6B35;">Login</h2>
+                    <button onclick="closeLoginModal()" class="text-gray-500 hover:text-gray-700 text-2xl">&times;</button>
+                </div>
+                <form id="loginForm" onsubmit="handleLogin(event)">
+                    <div class="mb-4">
+                        <label class="block text-sm font-medium text-gray-700 mb-2">Email</label>
+                        <input type="email" id="loginEmail" required 
+                               class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-500">
+                    </div>
+                    <div class="mb-4">
+                        <label class="block text-sm font-medium text-gray-700 mb-2">Password</label>
+                        <input type="password" id="loginPassword" required 
+                               class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-500">
+                    </div>
+                    <div id="loginError" class="mb-4 text-red-600 text-sm" style="display: none;"></div>
+                    <div class="flex gap-3">
+                        <button type="submit" class="flex-1 px-4 py-2 bg-orange-500 text-white rounded-lg hover:bg-orange-600 transition-all">
+                            Login
+                        </button>
+                        <button type="button" onclick="openSignupModal()" class="flex-1 px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-all">
+                            Sign Up
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- Signup Modal -->
+        <div id="signupModal" class="modal">
+            <div class="modal-content max-w-md">
+                <div class="flex justify-between items-center mb-4">
+                    <h2 class="text-2xl font-bold" style="color: #FF6B35;">Sign Up</h2>
+                    <button onclick="closeSignupModal()" class="text-gray-500 hover:text-gray-700 text-2xl">&times;</button>
+                </div>
+                <p class="text-sm text-gray-600 mb-4">Your account will require admin approval before you can login.</p>
+                <form id="signupForm" onsubmit="handleSignup(event)">
+                    <div class="mb-4">
+                        <label class="block text-sm font-medium text-gray-700 mb-2">Email</label>
+                        <input type="email" id="signupEmail" required 
+                               class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-500">
+                    </div>
+                    <div class="mb-4">
+                        <label class="block text-sm font-medium text-gray-700 mb-2">Password</label>
+                        <input type="password" id="signupPassword" required minlength="6"
+                               class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-500">
+                        <p class="text-xs text-gray-500 mt-1">Minimum 6 characters</p>
+                    </div>
+                    <div class="mb-4">
+                        <label class="block text-sm font-medium text-gray-700 mb-2">Confirm Password</label>
+                        <input type="password" id="signupPasswordConfirm" required 
+                               class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-500">
+                    </div>
+                    <div id="signupError" class="mb-4 text-red-600 text-sm" style="display: none;"></div>
+                    <div id="signupSuccess" class="mb-4 text-green-600 text-sm" style="display: none;"></div>
+                    <div class="flex gap-3">
+                        <button type="submit" class="flex-1 px-4 py-2 bg-orange-500 text-white rounded-lg hover:bg-orange-600 transition-all">
+                            Sign Up
+                        </button>
+                        <button type="button" onclick="openLoginModal()" class="flex-1 px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-all">
+                            Back to Login
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- Change Password Modal -->
+        <div id="changePasswordModal" class="modal">
+            <div class="modal-content max-w-md">
+                <div class="flex justify-between items-center mb-4">
+                    <h2 class="text-2xl font-bold" style="color: #FF6B35;">Change Password</h2>
+                    <button onclick="closeChangePasswordModal()" class="text-gray-500 hover:text-gray-700 text-2xl">&times;</button>
+                </div>
+                <form id="changePasswordForm" onsubmit="handleChangePassword(event)">
+                    <div class="mb-4">
+                        <label class="block text-sm font-medium text-gray-700 mb-2">Current Password</label>
+                        <input type="password" id="currentPassword" required 
+                               class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-500">
+                    </div>
+                    <div class="mb-4">
+                        <label class="block text-sm font-medium text-gray-700 mb-2">New Password</label>
+                        <input type="password" id="newPassword" required minlength="6"
+                               class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-500">
+                    </div>
+                    <div class="mb-4">
+                        <label class="block text-sm font-medium text-gray-700 mb-2">Confirm New Password</label>
+                        <input type="password" id="newPasswordConfirm" required 
+                               class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-500">
+                    </div>
+                    <div id="changePasswordError" class="mb-4 text-red-600 text-sm" style="display: none;"></div>
+                    <div id="changePasswordSuccess" class="mb-4 text-green-600 text-sm" style="display: none;"></div>
+                    <div class="flex gap-3">
+                        <button type="submit" class="flex-1 px-4 py-2 bg-orange-500 text-white rounded-lg hover:bg-orange-600 transition-all">
+                            Change Password
+                        </button>
+                        <button type="button" onclick="closeChangePasswordModal()" class="flex-1 px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-all">
+                            Cancel
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- Admin Panel Modal -->
+        <div id="adminPanelModal" class="modal">
+            <div class="modal-content max-w-2xl">
+                <div class="flex justify-between items-center mb-4">
+                    <h2 class="text-2xl font-bold" style="color: #FF6B35;">
+                        <i class="fas fa-users-cog mr-2"></i>Admin Panel
+                    </h2>
+                    <button onclick="closeAdminPanel()" class="text-gray-500 hover:text-gray-700 text-2xl">&times;</button>
+                </div>
+                <div id="adminPanelContent">
+                    <div class="text-center py-8">
+                        <i class="fas fa-spinner fa-spin text-3xl text-gray-400"></i>
+                        <p class="mt-3 text-gray-600">Loading pending approvals...</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js" crossorigin="anonymous"></script>
+        <script src="https://cdn.jsdelivr.net/npm/mammoth@1.6.0/mammoth.browser.min.js" crossorigin="anonymous"></script>
+        <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js" crossorigin="anonymous"></script>
+        <script src="/static/app.js?v=4.2.0"></script>
+        <script src="/static/v41-features.js?v=4.2.0"></script>
+        <script src="/static/auth.js?v=1.0.0"></script>
+    </body>
+    </html>
+  `)
+})
+
+
+// ============================================
+// QUOTE BUILDER MODULE - Equipment API Endpoints
+// ============================================
+
+// Get all equipment
+app.get('/api/equipment', async (c) => {
+  try {
+    const { results } = await c.env.DB.prepare(`
+      SELECT * FROM equipment ORDER BY name ASC
+    `).all()
+    return c.json({ success: true, data: results })
+  } catch (error: any) {
+    return c.json({ success: false, error: error.message }, 500)
+  }
+})
+
+// Search equipment
+app.get('/api/equipment/search', async (c) => {
+  try {
+    const q = c.req.query('q') || ''
+    const { results } = await c.env.DB.prepare(`
+      SELECT * FROM equipment WHERE name LIKE ? ORDER BY name ASC LIMIT 20
+    `).bind(`%${q}%`).all()
+    return c.json({ success: true, data: results })
+  } catch (error: any) {
+    return c.json({ success: false, error: error.message }, 500)
+  }
+})
+
+// Add equipment
+app.post('/api/equipment', async (c) => {
+  try {
+    const body = await c.req.json()
+    const { name, rate } = body
+    if (!name || !rate) {
+      return c.json({ success: false, error: 'Name and rate required' }, 400)
+    }
+    await c.env.DB.prepare(`
+      INSERT INTO equipment (name, rate) VALUES (?, ?)
+    `).bind(name.toUpperCase(), parseInt(rate)).run()
+    return c.json({ success: true })
+  } catch (error: any) {
+    return c.json({ success: false, error: error.message }, 500)
+  }
+})
+
+// Update equipment
+app.put('/api/equipment/:id', async (c) => {
+  try {
+    const id = c.req.param('id')
+    const body = await c.req.json()
+    const { name, rate } = body
+    await c.env.DB.prepare(`
+      UPDATE equipment SET name = ?, rate = ? WHERE id = ?
+    `).bind(name.toUpperCase(), parseInt(rate), id).run()
+    return c.json({ success: true })
+  } catch (error: any) {
+    return c.json({ success: false, error: error.message }, 500)
+  }
+})
+
+// Delete equipment
+app.delete('/api/equipment/:id', async (c) => {
+  try {
+    const id = c.req.param('id')
+    await c.env.DB.prepare(`DELETE FROM equipment WHERE id = ?`).bind(id).run()
+    return c.json({ success: true })
+  } catch (error: any) {
+    return c.json({ success: false, error: error.message }, 500)
+  }
+})
+
+// ============================================
+// QUOTE BUILDER PAGE - Light Green Theme (Exact Match to Screenshots)
+// ============================================
+const QUOTE_BUILDER_STYLES = `
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { 
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+    background: #f5f7f5;
+    color: #2d3436;
+    min-height: 100vh;
+    padding: 20px;
+  }
+  .container { max-width: 900px; margin: 0 auto; }
+  h1 { font-size: 1.75rem; font-weight: 600; margin-bottom: 0.25rem; color: #2d3436; }
+  .nav-links { font-size: 0.9rem; color: #636e72; margin-bottom: 1.5rem; }
+  .nav-links a { color: #81a896; text-decoration: none; }
+  .nav-links a:hover { text-decoration: underline; }
+  .card {
+    background: white;
+    border-radius: 12px;
+    padding: 1.5rem;
+    margin-bottom: 1rem;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+    border: 1px solid #e8efe8;
+  }
+  .card-header { font-weight: 600; font-size: 1rem; margin-bottom: 1rem; color: #2d3436; }
+  input, select, textarea {
+    font-family: inherit;
+    background: white;
+    border: 1px solid #d1ddd1;
+    color: #2d3436;
+    padding: 0.75rem;
+    font-size: 0.9rem;
+    width: 100%;
+    border-radius: 8px;
+  }
+  input:focus, select:focus, textarea:focus {
+    outline: none;
+    border-color: #81a896;
+    box-shadow: 0 0 0 3px rgba(129, 168, 150, 0.2);
+  }
+  button {
+    font-family: inherit;
+    padding: 0.75rem 1.25rem;
+    background: #81a896;
+    border: none;
+    color: white;
+    cursor: pointer;
+    font-size: 0.9rem;
+    border-radius: 8px;
+    font-weight: 500;
+  }
+  button:hover { background: #6b9480; }
+  button.danger { background: #e74c3c; }
+  button.danger:hover { background: #c0392b; }
+  button.secondary { background: #f5f7f5; color: #2d3436; border: 1px solid #d1ddd1; }
+  button.secondary:hover { background: #e8efe8; }
+  .equipment-row {
+    display: grid;
+    grid-template-columns: 1fr 80px 40px;
+    gap: 0.75rem;
+    margin-bottom: 0.75rem;
+    align-items: center;
+  }
+  .add-row-btn {
+    background: white;
+    color: #81a896;
+    border: 1px dashed #81a896;
+    padding: 0.5rem 1rem;
+    font-size: 0.85rem;
+    margin-top: 0.5rem;
+  }
+  .add-row-btn:hover { background: #f0f5f0; }
+  .autocomplete { position: relative; }
+  .autocomplete-list {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    background: white;
+    border: 1px solid #d1ddd1;
+    border-top: none;
+    border-radius: 0 0 8px 8px;
+    max-height: 200px;
+    overflow-y: auto;
+    z-index: 100;
+    box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+  }
+  .autocomplete-item {
+    padding: 0.75rem;
+    cursor: pointer;
+    font-size: 0.85rem;
+    border-bottom: 1px solid #f0f0f0;
+  }
+  .autocomplete-item:hover { background: #f5f7f5; }
+  .create-btn {
+    width: 100%;
+    padding: 1rem;
+    font-size: 1rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .quote-display { margin-top: 1.5rem; }
+  .quote-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 1rem;
+  }
+  .quote-header h3 { font-size: 1.1rem; font-weight: 600; }
+  .quote-actions { display: flex; gap: 0.5rem; }
+  .quote-table { width: 100%; border-collapse: collapse; }
+  .quote-table th {
+    background: #81a896;
+    color: white;
+    padding: 0.75rem;
+    text-align: left;
+    font-size: 0.85rem;
+    font-weight: 500;
+  }
+  .quote-table td {
+    padding: 0.75rem;
+    border-bottom: 1px solid #e8efe8;
+    font-size: 0.9rem;
+  }
+  .quote-table tr:nth-child(even) { background: #fafcfa; }
+  .quote-total td {
+    background: #e8f5e9;
+    font-weight: 500;
+  }
+  .notes-section { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid #e8efe8; }
+  .notes-section strong { font-size: 0.9rem; }
+  @media (max-width: 600px) {
+    .equipment-row { grid-template-columns: 1fr 60px 36px; }
+    .quote-actions { flex-wrap: wrap; }
+  }
+`;
+
+function QuoteBuilderPage(activeTab = 'quotes') {
+  return `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Live Sound Hire Quote Builder</title>
+  <style>${QUOTE_BUILDER_STYLES}</style>
+</head>
+<body>
+  <div class="container">
+    <h1>Live Sound Hire Quote Builder</h1>
+    <div class="nav-links">
+      <a href="/quotes" style="${activeTab === 'quotes' ? 'font-weight:600;color:#2d3436;' : ''}">Quote Builder</a> | 
+      <a href="/equipment" style="${activeTab === 'equipment' ? 'font-weight:600;color:#2d3436;' : ''}">Manage Equipment</a>
+      <span style="float:right;"><a href="/">← Back to Schedule</a></span>
+    </div>
+    <div id="app">Loading...</div>
+  </div>
+  <script>
+    const activeTab = '${activeTab}';
+    let state = {
+      equipment: [],
+      quoteItems: [{ equipment_id: null, name: '', rate: 0, qty: 1 }],
+      quoteNotes: '',
+      generatedQuote: null,
+      editingId: null
+    };
+    
+    async function api(path, opts = {}) {
+      const res = await fetch(path, {
+        ...opts,
+        headers: { 'Content-Type': 'application/json', ...opts.headers }
+      });
+      return res.json();
+    }
+    
+    // Initialize
+    document.addEventListener('DOMContentLoaded', () => {
+      if (activeTab === 'quotes') loadQuotes();
+      else if (activeTab === 'equipment') loadEquipment();
+    });
+    
+    // ============================================
+    // QUOTE BUILDER
+    // ============================================
+    async function loadQuotes() {
+      const res = await api('/api/equipment');
+      state.equipment = res.data || [];
+      state.quoteItems = [{ equipment_id: null, name: '', rate: 0, qty: 1 }];
+      state.generatedQuote = null;
+      renderQuotes();
+    }
+    
+    function renderQuotes() {
+      if (state.generatedQuote) {
+        renderGeneratedQuote();
+        return;
+      }
+      
+      document.getElementById('app').innerHTML = \`
+        <div class="card">
+          <div class="card-header">Equipment Selection</div>
+          <div id="quoteItems">
+            \${state.quoteItems.map((item, i) => \`
+              <div class="equipment-row">
+                <div class="autocomplete">
+                  <input type="text" placeholder="Search equipment..."
+                         value="\${item.name || ''}"
+                         oninput="searchEquipment(\${i}, this.value)"
+                         onfocus="searchEquipment(\${i}, this.value)" />
+                  <div id="autocomplete-\${i}" class="autocomplete-list" style="display:none;"></div>
+                </div>
+                <input type="number" min="1" value="\${item.qty}"
+                       onchange="updateQty(\${i}, this.value)" style="text-align:center;width:80px;" />
+                <button class="danger" onclick="removeQuoteItem(\${i})" style="width:40px;padding:0.5rem;">×</button>
+              </div>
+            \`).join('')}
+          </div>
+          <button class="add-row-btn" onclick="addQuoteItem()">+ ADD EQUIPMENT ROW</button>
+        </div>
+        
+        <div class="card">
+          <div class="card-header">Additional Notes:</div>
+          <textarea id="quoteNotes" rows="4" placeholder="Enter any additional notes or requirements..."
+                    onchange="state.quoteNotes = this.value">\${state.quoteNotes}</textarea>
+        </div>
+        
+        <button class="create-btn" onclick="createQuote()">CREATE QUOTE</button>
+      \`;
+    }
+    
+    let searchTimeout;
+    async function searchEquipment(index, query) {
+      clearTimeout(searchTimeout);
+      const dropdown = document.getElementById('autocomplete-' + index);
+      
+      if (!query || query.length < 1) {
+        // Show all equipment when empty
+        searchTimeout = setTimeout(async () => {
+          const res = await api('/api/equipment');
+          const items = res.data || [];
+          if (items.length === 0) { dropdown.style.display = 'none'; return; }
+          dropdown.innerHTML = items.map(eq => \`
+            <div class="autocomplete-item" onclick="selectEquipment(\${index}, \${eq.id}, '\${eq.name.replace(/'/g, "\\\\'")}', \${eq.rate})">
+              \${eq.name} - Rs. \${eq.rate}
+            </div>
+          \`).join('');
+          dropdown.style.display = 'block';
+        }, 100);
+        return;
+      }
+      
+      searchTimeout = setTimeout(async () => {
+        const res = await api('/api/equipment/search?q=' + encodeURIComponent(query));
+        const items = res.data || [];
+        if (items.length === 0) { dropdown.style.display = 'none'; return; }
+        dropdown.innerHTML = items.map(eq => \`
+          <div class="autocomplete-item" onclick="selectEquipment(\${index}, \${eq.id}, '\${eq.name.replace(/'/g, "\\\\'")}', \${eq.rate})">
+            \${eq.name} - Rs. \${eq.rate}
+          </div>
+        \`).join('');
+        dropdown.style.display = 'block';
+      }, 150);
+    }
+    
+    function selectEquipment(index, id, name, rate) {
+      state.quoteItems[index] = { equipment_id: id, name, rate, qty: state.quoteItems[index].qty };
+      document.getElementById('autocomplete-' + index).style.display = 'none';
+      renderQuotes();
+    }
+    
+    function updateQty(index, qty) {
+      state.quoteItems[index].qty = parseInt(qty) || 1;
+    }
+    
+    function addQuoteItem() {
+      state.quoteItems.push({ equipment_id: null, name: '', rate: 0, qty: 1 });
+      renderQuotes();
+    }
+    
+    function removeQuoteItem(index) {
+      if (state.quoteItems.length > 1) {
+        state.quoteItems.splice(index, 1);
+        renderQuotes();
+      }
+    }
+    
+    function createQuote() {
+      const validItems = state.quoteItems.filter(i => i.equipment_id && i.rate > 0);
+      if (validItems.length === 0) {
+        alert('Please add at least one equipment item');
+        return;
+      }
+      
+      const subtotal = validItems.reduce((sum, i) => sum + (i.rate * i.qty), 0);
+      const gst = Math.round(subtotal * 0.18);
+      const total = subtotal + gst;
+      
+      state.generatedQuote = { items: validItems, subtotal, gst, total, notes: state.quoteNotes };
+      renderGeneratedQuote();
+    }
+    
+    function renderGeneratedQuote() {
+      const q = state.generatedQuote;
+      document.getElementById('app').innerHTML = \`
+        <div class="card quote-display">
+          <div class="quote-header">
+            <h3>Quote</h3>
+            <div class="quote-actions">
+              <button class="secondary" onclick="copyQuote()">📋 Copy Quote</button>
+              <button class="secondary" onclick="createNewQuote()">+ Create New Quote</button>
+            </div>
+          </div>
+          
+          <table class="quote-table">
+            <thead>
+              <tr>
+                <th>Item</th>
+                <th style="text-align:right;">Unit Cost (Rs.)</th>
+                <th style="text-align:center;">Qty</th>
+                <th style="text-align:right;">Total (Rs.)</th>
+              </tr>
+            </thead>
+            <tbody>
+              \${q.items.map(i => \`
+                <tr>
+                  <td>\${i.name}</td>
+                  <td style="text-align:right;">\${i.rate.toFixed(2)}</td>
+                  <td style="text-align:center;">\${i.qty}</td>
+                  <td style="text-align:right;">\${(i.rate * i.qty).toFixed(2)}</td>
+                </tr>
+              \`).join('')}
+              <tr class="quote-total">
+                <td colspan="3" style="text-align:right;">Subtotal:</td>
+                <td style="text-align:right;">\${q.subtotal.toFixed(2)}</td>
+              </tr>
+              <tr class="quote-total">
+                <td colspan="3" style="text-align:right;">GST (18%):</td>
+                <td style="text-align:right;">\${q.gst.toFixed(2)}</td>
+              </tr>
+              <tr class="quote-total" style="font-weight:700;">
+                <td colspan="3" style="text-align:right;">TOTAL:</td>
+                <td style="text-align:right;">\${q.total.toFixed(2)}</td>
+              </tr>
+            </tbody>
+          </table>
+          
+          \${q.notes ? \`
+            <div class="notes-section">
+              <strong>Additional Notes:</strong>
+              <p style="margin-top:0.5rem;">\${q.notes}</p>
+            </div>
+          \` : ''}
+        </div>
+      \`;
+    }
+    
+    function copyQuote() {
+      const q = state.generatedQuote;
+      let html = '<table border="1" cellpadding="8" style="border-collapse:collapse;font-family:Arial,sans-serif;">';
+      html += '<tr style="background:#81a896;color:white;"><th>Item</th><th>Unit Cost (Rs.)</th><th>Qty</th><th>Total (Rs.)</th></tr>';
+      q.items.forEach(i => {
+        html += '<tr><td>' + i.name + '</td><td align="right">' + i.rate.toFixed(2) + '</td><td align="center">' + i.qty + '</td><td align="right">' + (i.rate * i.qty).toFixed(2) + '</td></tr>';
+      });
+      html += '<tr style="background:#e8f5e9;"><td colspan="3" align="right"><strong>Subtotal:</strong></td><td align="right">' + q.subtotal.toFixed(2) + '</td></tr>';
+      html += '<tr style="background:#e8f5e9;"><td colspan="3" align="right"><strong>GST (18%):</strong></td><td align="right">' + q.gst.toFixed(2) + '</td></tr>';
+      html += '<tr style="background:#c8e6c9;"><td colspan="3" align="right"><strong>TOTAL:</strong></td><td align="right"><strong>' + q.total.toFixed(2) + '</strong></td></tr>';
+      html += '</table>';
+      if (q.notes) html += '<br><strong>Additional Notes:</strong><br>' + q.notes;
+      
+      try {
+        const blob = new Blob([html], { type: 'text/html' });
+        const item = new ClipboardItem({ 'text/html': blob });
+        navigator.clipboard.write([item]);
+        alert('Quote copied to clipboard!');
+      } catch (e) {
+        let text = 'EQUIPMENT QUOTE\\n' + '='.repeat(50) + '\\n';
+        q.items.forEach(i => { text += i.name + ' | Rs.' + i.rate + ' x ' + i.qty + ' = Rs.' + (i.rate * i.qty) + '\\n'; });
+        text += '-'.repeat(50) + '\\nSubtotal: Rs.' + q.subtotal + '\\nGST (18%): Rs.' + q.gst + '\\nTOTAL: Rs.' + q.total;
+        if (q.notes) text += '\\n\\nNotes: ' + q.notes;
+        navigator.clipboard.writeText(text);
+        alert('Quote copied (plain text)!');
+      }
+    }
+    
+    function createNewQuote() {
+      state.quoteItems = [{ equipment_id: null, name: '', rate: 0, qty: 1 }];
+      state.quoteNotes = '';
+      state.generatedQuote = null;
+      renderQuotes();
+    }
+    
+    // ============================================
+    // EQUIPMENT MANAGEMENT
+    // ============================================
+    async function loadEquipment() {
+      const res = await api('/api/equipment');
+      state.equipment = res.data || [];
+      renderEquipment();
+    }
+    
+    function renderEquipment() {
+      document.getElementById('app').innerHTML = \`
+        <div class="card">
+          <div class="card-header">Add New Equipment</div>
+          <div style="display:grid;grid-template-columns:1fr 150px auto;gap:0.75rem;align-items:end;">
+            <div>
+              <label style="font-size:0.85rem;color:#636e72;display:block;margin-bottom:0.25rem;">Equipment Name</label>
+              <input type="text" id="newName" placeholder="e.g., SHURE SM58" />
+            </div>
+            <div>
+              <label style="font-size:0.85rem;color:#636e72;display:block;margin-bottom:0.25rem;">Rate (Rs.)</label>
+              <input type="number" id="newRate" placeholder="e.g., 300" />
+            </div>
+            <button onclick="addEquipment()">+ Add Equipment</button>
+          </div>
+        </div>
+        
+        <div class="card">
+          <div class="card-header">Equipment List</div>
+          \${state.equipment.map(eq => \`
+            <div style="display:flex;justify-content:space-between;align-items:center;padding:0.75rem;margin-bottom:0.5rem;background:#fafcfa;border-radius:8px;border:1px solid #e8efe8;">
+              <div>
+                <strong>\${eq.name}</strong>
+                <span style="color:#81a896;margin-left:0.5rem;">Rs. \${eq.rate}</span>
+              </div>
+              <div style="display:flex;gap:0.5rem;">
+                <button class="secondary" onclick="editEquipment(\${eq.id}, '\${eq.name.replace(/'/g, "\\\\'")}', \${eq.rate})" style="padding:0.5rem 0.75rem;font-size:0.8rem;">✏️ Edit</button>
+                <button class="danger" onclick="deleteEquipment(\${eq.id})" style="padding:0.5rem 0.75rem;font-size:0.8rem;">🗑 Delete</button>
+              </div>
+            </div>
+          \`).join('')}
+        </div>
+        
+        <!-- Edit Modal -->
+        <div id="editModal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:1000;">
+          <div style="background:white;max-width:400px;margin:100px auto;padding:1.5rem;border-radius:12px;">
+            <h3 style="margin-bottom:1rem;">Edit Equipment</h3>
+            <div style="margin-bottom:1rem;">
+              <label style="font-size:0.85rem;color:#636e72;display:block;margin-bottom:0.25rem;">Equipment Name</label>
+              <input type="text" id="editName" />
+            </div>
+            <div style="margin-bottom:1rem;">
+              <label style="font-size:0.85rem;color:#636e72;display:block;margin-bottom:0.25rem;">Rate (Rs.)</label>
+              <input type="number" id="editRate" />
+            </div>
+            <div style="display:flex;gap:0.5rem;">
+              <button onclick="saveEdit()">Save</button>
+              <button class="secondary" onclick="closeEditModal()">Cancel</button>
+            </div>
+          </div>
+        </div>
+      \`;
+    }
+    
+    async function addEquipment() {
+      const name = document.getElementById('newName').value.trim();
+      const rate = parseInt(document.getElementById('newRate').value);
+      if (!name || !rate) { alert('Please enter name and rate'); return; }
+      
+      const res = await api('/api/equipment', {
+        method: 'POST',
+        body: JSON.stringify({ name, rate })
+      });
+      if (res.success) {
+        document.getElementById('newName').value = '';
+        document.getElementById('newRate').value = '';
+        loadEquipment();
+      } else {
+        alert(res.error || 'Failed to add equipment');
+      }
+    }
+    
+    function editEquipment(id, name, rate) {
+      state.editingId = id;
+      document.getElementById('editName').value = name;
+      document.getElementById('editRate').value = rate;
+      document.getElementById('editModal').style.display = 'block';
+    }
+    
+    function closeEditModal() {
+      document.getElementById('editModal').style.display = 'none';
+      state.editingId = null;
+    }
+    
+    async function saveEdit() {
+      const name = document.getElementById('editName').value.trim();
+      const rate = parseInt(document.getElementById('editRate').value);
+      if (!name || !rate) { alert('Please enter name and rate'); return; }
+      
+      const res = await api('/api/equipment/' + state.editingId, {
+        method: 'PUT',
+        body: JSON.stringify({ name, rate })
+      });
+      if (res.success) {
+        closeEditModal();
+        loadEquipment();
+      } else {
+        alert(res.error || 'Failed to update');
+      }
+    }
+    
+    async function deleteEquipment(id) {
+      if (!confirm('Delete this equipment?')) return;
+      const res = await api('/api/equipment/' + id, { method: 'DELETE' });
+      if (res.success) loadEquipment();
+      else alert(res.error || 'Failed to delete');
+    }
+    
+    // Close dropdown when clicking outside
+    document.addEventListener('click', (e) => {
+      if (!e.target.closest('.autocomplete')) {
+        document.querySelectorAll('.autocomplete-list').forEach(d => d.style.display = 'none');
+      }
+    });
+  </script>
+</body>
+</html>`;
 }
+
+// Quote Builder routes
+app.get('/quotes', (c) => c.html(QuoteBuilderPage('quotes')))
+app.get('/equipment', (c) => c.html(QuoteBuilderPage('equipment')))
+
+
+// ============================================
+// SETTINGS PAGE (API Key Configuration)
+// ============================================
+
+// Get settings (public info only)
+app.get('/api/settings', async (c) => {
+  try {
+    const { results } = await c.env.DB.prepare(`
+      SELECT username, 
+             CASE WHEN anthropic_api_key IS NOT NULL AND anthropic_api_key != '' THEN 1 ELSE 0 END as has_api_key
+      FROM app_settings WHERE id = 1
+    `).all()
+    
+    const settings = results?.[0] || { username: 'ncpalivesound', has_api_key: false }
+    return c.json({ success: true, data: settings })
+  } catch (error: any) {
+    return c.json({ success: false, error: error.message }, 500)
+  }
+})
+
+// Update API key
+app.post('/api/settings/api-key', async (c) => {
+  try {
+    const body = await c.req.json()
+    const { api_key } = body
+    
+    if (!api_key) {
+      return c.json({ success: false, error: 'API key required' }, 400)
+    }
+    
+    await c.env.DB.prepare(`
+      UPDATE app_settings SET anthropic_api_key = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1
+    `).bind(api_key).run()
+    
+    return c.json({ success: true, message: 'API key updated' })
+  } catch (error: any) {
+    return c.json({ success: false, error: error.message }, 500)
+  }
+})
+
+// Settings Page
+function SettingsPage() {
+  return `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Settings - NCPA Sound Ops</title>
+  <style>${QUOTE_BUILDER_STYLES}</style>
+</head>
+<body>
+  <div class="container">
+    <h1>Settings</h1>
+    <div class="nav-links">
+      <a href="/">← Back to Schedule</a> | <a href="/quotes">Quote Builder</a>
+    </div>
+    <div id="app">Loading...</div>
+  </div>
+  <script>
+    async function api(path, opts = {}) {
+      const res = await fetch(path, {
+        ...opts,
+        headers: { 'Content-Type': 'application/json', ...opts.headers }
+      });
+      return res.json();
+    }
+    
+    document.addEventListener('DOMContentLoaded', loadSettings);
+    
+    async function loadSettings() {
+      const res = await api('/api/settings');
+      const settings = res.data || {};
+      
+      document.getElementById('app').innerHTML = \`
+        <div class="card">
+          <div class="card-header">🔑 Anthropic API Key</div>
+          <p style="font-size:0.9rem;color:#636e72;margin-bottom:1rem;">
+            Configure your Anthropic API key to enable AI-powered features like Word document parsing.
+            \${settings.has_api_key ? '<span style="color:#22c55e;margin-left:0.5rem;">✓ API key configured</span>' : '<span style="color:#dc2626;margin-left:0.5rem;">✗ No API key set</span>'}
+          </p>
+          <div style="display:flex;gap:1rem;align-items:end;">
+            <div style="flex:1;">
+              <label style="font-size:0.85rem;color:#636e72;display:block;margin-bottom:0.25rem;">API Key</label>
+              <input type="password" id="apiKey" placeholder="sk-ant-api03-..." style="font-family:monospace;" />
+            </div>
+            <button onclick="saveApiKey()">💾 Save API Key</button>
+          </div>
+          <p style="font-size:0.75rem;color:#9ca3af;margin-top:0.75rem;">
+            Get your API key from <a href="https://console.anthropic.com/settings/keys" target="_blank" style="color:#81a896;">Anthropic Console</a>
+          </p>
+        </div>
+        
+        <div class="card">
+          <div class="card-header">ℹ️ About</div>
+          <p style="font-size:0.9rem;color:#636e72;">
+            <strong>NCPA Sound Ops</strong> is a unified application for managing:
+          </p>
+          <ul style="font-size:0.9rem;color:#636e72;margin:1rem 0;padding-left:1.5rem;">
+            <li><strong>Event Schedule</strong> - Calendar view, event management, crew assignments</li>
+            <li><strong>Quote Builder</strong> - Generate equipment hire quotes with GST calculation</li>
+            <li><strong>Equipment Management</strong> - Manage your equipment inventory and rates</li>
+          </ul>
+        </div>
+      \`;
+    }
+    
+    async function saveApiKey() {
+      const apiKey = document.getElementById('apiKey').value.trim();
+      if (!apiKey) {
+        alert('Please enter an API key');
+        return;
+      }
+      
+      const res = await api('/api/settings/api-key', {
+        method: 'POST',
+        body: JSON.stringify({ api_key: apiKey })
+      });
+      
+      if (res.success) {
+        alert('API key saved successfully!');
+        document.getElementById('apiKey').value = '';
+        loadSettings();
+      } else {
+        alert('Error: ' + (res.error || 'Failed to save'));
+      }
+    }
+  </script>
+</body>
+</html>`;
+}
+
+app.get('/settings', (c) => c.html(SettingsPage()))
 
 export default app
