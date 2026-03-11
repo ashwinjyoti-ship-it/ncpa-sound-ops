@@ -1342,6 +1342,327 @@ app.post('/api/settings/get-api-key', async (c) => {
   }
 })
 
+
+// ============================================
+// AI-POWERED EVENT SCHEDULE PARSER (Original from ncpa-sound-manager)
+// ============================================
+
+// Helper function: Parse a chunk of text with Claude (ORIGINAL PROMPT - DO NOT MODIFY)
+async function parseChunkWithClaude(chunk: string, contextHint: string, apiKey: string, chunkNumber: number, totalChunks: number): Promise<any[]> {
+  const prompt = `You are parsing section ${chunkNumber} of ${totalChunks} from an NCPA Sound Crew event schedule document. Extract ALL events from this section and return them as a JSON array.${contextHint}
+
+Document section:
+${chunk}
+
+Parse ALL events and extract the following fields for EACH event:
+- event_date: Date in YYYY-MM-DD format (extract from "Day & Date" column or date information. USE THE MONTH AND YEAR FROM THE CONTEXT ABOVE if provided in filename)
+- program: Full program/event name (from "Programme" or "Event" column)
+- venue: Venue name (e.g., "Tata Theatre", "Experimental Theatre", "Jamshed Bhabha Theatre", "Little Theatre", "GDT", "TET", "LT", "JBT", "DPAG", "Stuart Liff Lib", "TT")
+- team: Curator/team name if mentioned (often in brackets like [Dr.Swapno/Team], [Nooshin/Team], [Tejal/Team])
+- sound_requirements: Extract ONLY sound-related requirements. Look for text blocks containing "Sound" or sound equipment. Extract: mic specifications (e.g., "2 cordless mics"), playback equipment (e.g., "laptop for recorded music"), "NCPA basic sound", sound check times, mic stand counts, monitor speaker needs. EXCLUDE: catering info, parking, ushers, lights, AC, general stage setup, non-sound requirements.
+- call_time: Extract the time when sound must be ready from phrases like: "ready by [TIME]", "to be ready by [TIME]", "Sound Check at [TIME]", "sound to be ready by [TIME]", "connections to be ready by [TIME]", "calltime: Ready by [TIME]". Extract times like "9am", "9:00am", "2:00pm", "2pm". If multiple times found, use the sound-specific readiness time.
+- crew: Crew member initials assigned (e.g., "AGN", "FD", "SP", "VSD", "LDPG", "NP", "SA", "BBK", "TT")
+
+CRITICAL EXTRACTION RULES FOR SOUND REQUIREMENTS:
+1. Look for lines or phrases starting with "Sound" followed by a dash, colon, or bullet point
+2. Extract equipment details: mic types (cordless, lapel, foot mics), counts (e.g., "2 cordless mics"), playback devices (laptop, aux wire)
+3. Include "NCPA basic sound" if mentioned
+4. Capture sound-specific setup times embedded in the requirements
+5. DO NOT include: catering, parking, ushers, lights, AC, cleaning schedules, non-sound staff requirements
+6. If requirements say "Requirements will follow" or similar, leave sound_requirements empty
+
+CRITICAL EXTRACTION RULES FOR CALL TIME:
+1. Search for these patterns (case-insensitive):
+   - "ready by [TIME]"
+   - "to be ready by [TIME]"
+   - "Sound Check at [TIME]"
+   - "sound to be ready by [TIME]"
+   - "connections to be ready by [TIME]"
+   - "calltime: [TIME]"
+   - "calltime: Ready by [TIME]"
+2. TIME formats to extract: "9am", "9:00am", "9:00 am", "2pm", "2:00pm", "6:30pm", "12noon"
+3. The call_time is when sound CREW must be ready, not the event start time
+4. Normalize the time format to include AM/PM with proper spacing (e.g., "9:00 AM", "2:00 PM")
+
+CRITICAL DATE INSTRUCTIONS:
+1. Look for day names (Mon, Tue, Wed, Thu, Fri, Sat, Sun) followed by dates (Thu 4th, Fri 5th, Wed 1st, Sat 7th, etc.)
+2. USE THE MONTH AND YEAR FROM THE CONTEXT provided in the filename above
+3. If context says "March 2026", then "Sun 1st" becomes "2026-03-01", "Mon 2nd" becomes "2026-03-02", etc.
+4. ALWAYS use the context month/year from the filename
+
+VENUE CODE MAPPING (use full names):
+- TT or TET → "Tata Theatre"
+- JBT → "Jamshed Bhabha Theatre"
+- GDT → "Godrej Dance Theatre"
+- LT → "Little Theatre"
+- DPAG → "Dilip Piramal Art Gallery"
+- Experimental Theatre or Exp → "Experimental Theatre"
+
+Return ONLY a valid JSON array, nothing else. No explanations, no markdown, just the JSON array.
+
+CRITICAL JSON REQUIREMENTS:
+- Use double quotes for all strings
+- Escape any quotes inside strings with backslash
+- No trailing commas
+- No newlines inside string values (replace with spaces)
+- If a field contains special characters, escape them properly
+
+Example format:
+[
+  {
+    "event_date": "2026-03-01",
+    "program": "Grufalo - A Twisted Tale",
+    "venue": "Tata Theatre",
+    "team": "Nooshin/Team",
+    "sound_requirements": "2 cordless mics, aux wire for recorded music",
+    "call_time": "9:00 AM",
+    "crew": "TET"
+  },
+  {
+    "event_date": "2026-03-05",
+    "program": "NCPA Nrityagurukul",
+    "venue": "Tata Theatre",
+    "team": "Dr.Swapno/Team",
+    "sound_requirements": "2 cordless mics, laptop for recorded music",
+    "call_time": "",
+    "crew": "AGN"
+  },
+  {
+    "event_date": "2026-03-06",
+    "program": "Living Traditions",
+    "venue": "Tata Theatre",
+    "team": "Dr.Swapno/Team",
+    "sound_requirements": "sound to be ready by 9:00 am",
+    "call_time": "9:00 AM",
+    "crew": "AGN"
+  },
+  {
+    "event_date": "2026-03-07",
+    "program": "Animal",
+    "venue": "Tata Theatre",
+    "team": "Nooshin/Team",
+    "sound_requirements": "NCPA basic sound",
+    "call_time": "2:00 PM",
+    "crew": "TT"
+  }
+]
+
+If no events found, return: []`
+  
+  const response = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01'
+    },
+    body: JSON.stringify({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 8192,
+      messages: [{
+        role: 'user',
+        content: prompt
+      }]
+    })
+  })
+  
+  if (!response.ok) {
+    const error = await response.text()
+    console.error(`Chunk ${chunkNumber} AI error:`, error)
+    throw new Error(`AI parsing failed for chunk ${chunkNumber}`)
+  }
+  
+  const aiResult = await response.json() as any
+  let aiResponse = aiResult.content[0].text.trim()
+  
+  // Remove markdown code blocks if present
+  aiResponse = aiResponse.replace(/```json\s*/g, '').replace(/```\s*/g, '')
+  
+  // Parse JSON response with better error handling
+  try {
+    // Try to find JSON array in response
+    const jsonMatch = aiResponse.match(/\[[\s\S]*\]/)
+    if (jsonMatch) {
+      const jsonStr = jsonMatch[0]
+      
+      // Clean up common JSON issues
+      let cleanedJson = jsonStr
+        // Remove trailing commas before ] or }
+        .replace(/,(\s*[\]}])/g, '$1')
+        // Fix unescaped newlines in strings (replace with space)
+        .replace(/("[^"]*)\n([^"]*")/g, '$1 $2')
+      
+      return JSON.parse(cleanedJson)
+    } else {
+      // Try parsing directly
+      return JSON.parse(aiResponse)
+    }
+  } catch (parseError: any) {
+    console.error(`Failed to parse chunk ${chunkNumber} response:`, parseError.message)
+    console.error(`Response preview:`, aiResponse.substring(0, 200))
+    return []
+  }
+}
+
+// Helper function: Remove duplicate events
+function deduplicateEvents(events: any[]): any[] {
+  const seen = new Set()
+  const unique: any[] = []
+  
+  for (const event of events) {
+    // Create unique key from date + program + venue
+    const key = `${event.event_date}|${event.program}|${event.venue}`.toLowerCase()
+    
+    if (!seen.has(key)) {
+      seen.add(key)
+      unique.push(event)
+    }
+  }
+  
+  return unique
+}
+
+// AI-powered Word document parser for event schedules (ORIGINAL IMPLEMENTATION)
+app.post('/api/ai/parse-word', async (c) => {
+  try {
+    const body = await c.req.json()
+    const { text, filename, password } = body
+    
+    if (!text) {
+      return c.json({ success: false, error: 'Document text is required' }, 400)
+    }
+    
+    // Get API key from Settings database (instead of env)
+    const settings = await c.env.DB.prepare(
+      'SELECT anthropic_api_key, api_key_iv, password_hash, password_salt FROM app_settings WHERE id = 1'
+    ).first() as any
+    
+    if (!settings || !settings.anthropic_api_key || !settings.api_key_iv) {
+      return c.json({ 
+        success: false, 
+        error: 'No Anthropic API key configured. Please add your API key in Settings.',
+        requiresApiKey: true
+      }, 400)
+    }
+    
+    if (!password) {
+      return c.json({ 
+        success: false, 
+        error: 'Password required to decrypt API key',
+        requiresPassword: true
+      }, 400)
+    }
+    
+    // Verify password
+    const passwordValid = await verifyPassword(password, settings.password_hash, settings.password_salt)
+    if (!passwordValid) {
+      return c.json({ success: false, error: 'Invalid password' }, 401)
+    }
+    
+    // Decrypt the API key
+    const apiKey = await decryptApiKey(settings.anthropic_api_key, settings.api_key_iv, password)
+    if (!apiKey) {
+      return c.json({ success: false, error: 'Failed to decrypt API key. Please re-enter your API key in Settings.' }, 500)
+    }
+    
+    // Extract month/year context from filename if available
+    let contextHint = ''
+    if (filename) {
+      const monthMatch = filename.match(/(january|february|march|april|may|june|july|august|september|october|november|december)/i)
+      const yearMatch = filename.match(/20\d{2}/)
+      if (monthMatch || yearMatch) {
+        contextHint = `\n\nContext from filename: ${monthMatch?.[0] || ''} ${yearMatch?.[0] || ''}`
+      }
+    }
+    
+    console.log(`📄 Processing Word document: ${text.length} characters`)
+    
+    // CHUNKED PROCESSING: Split document into manageable chunks
+    // Using larger chunks (18K) and smarter splitting to avoid cutting events
+    const CHUNK_SIZE = 18000 // Characters per chunk (increased for better event capture)
+    const chunks: string[] = []
+    
+    if (text.length <= CHUNK_SIZE) {
+      // Small document - process in one chunk
+      chunks.push(text)
+    } else {
+      // Large document - split intelligently at event boundaries
+      for (let i = 0; i < text.length; i += CHUNK_SIZE) {
+        let chunkEnd = Math.min(i + CHUNK_SIZE, text.length)
+        
+        // If not at end of document, try to find a good split point
+        if (chunkEnd < text.length) {
+          // Look for a day pattern (Mon/Tue/Wed etc) in the next 500 chars
+          const searchArea = text.substring(chunkEnd, Math.min(chunkEnd + 500, text.length))
+          const dayMatch = searchArea.match(/\n(Mon|Tue|Wed|Thu|Fri|Sat|Sun) \d{1,2}(st|nd|rd|th)/i)
+          
+          if (dayMatch && dayMatch.index !== undefined) {
+            // Split at the start of the next event
+            chunkEnd += dayMatch.index
+          }
+        }
+        
+        chunks.push(text.substring(i, chunkEnd))
+      }
+    }
+    
+    console.log(`📊 Split into ${chunks.length} chunks for processing (avg ${Math.round(text.length / chunks.length)} chars each)`)
+    
+    // Process each chunk with Claude
+    const allEvents: any[] = []
+    
+    for (let i = 0; i < chunks.length; i++) {
+      console.log(`🤖 Processing chunk ${i + 1}/${chunks.length}...`)
+      
+      try {
+        const chunkEvents = await parseChunkWithClaude(
+          chunks[i],
+          contextHint,
+          apiKey,
+          i + 1,
+          chunks.length
+        )
+        
+        console.log(`✅ Chunk ${i + 1}: Found ${chunkEvents.length} events`)
+        allEvents.push(...chunkEvents)
+        
+      } catch (chunkError: any) {
+        console.error(`❌ Chunk ${i + 1} failed:`, chunkError.message)
+        // Continue processing other chunks even if one fails
+      }
+    }
+    
+    // Validate and clean events
+    let validEvents = allEvents.filter(event => {
+      return event.event_date && event.program && event.venue
+    })
+    
+    // Remove duplicates (events that appear in multiple chunks)
+    validEvents = deduplicateEvents(validEvents)
+    
+    // Sort by date
+    validEvents.sort((a, b) => {
+      return a.event_date.localeCompare(b.event_date)
+    })
+    
+    console.log(`✅ Successfully parsed ${validEvents.length} unique events from ${chunks.length} chunks`)
+    
+    return c.json({ 
+      success: true,
+      events: validEvents,
+      message: `Found ${validEvents.length} events in document (processed in ${chunks.length} chunks)`,
+      chunks: chunks.length,
+      totalEvents: allEvents.length,
+      uniqueEvents: validEvents.length
+    })
+    
+  } catch (error: any) {
+    console.error('Word parsing error:', error)
+    return c.json({ success: false, error: error.message || 'Failed to parse document' }, 500)
+  }
+})
+
+
 // ============================================
 // MAIN UI
 // ============================================
