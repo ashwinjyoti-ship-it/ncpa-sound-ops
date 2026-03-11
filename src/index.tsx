@@ -5,6 +5,99 @@ import { renderer } from './renderer'
 import type { Env } from './types'
 
 // ============================================
+// CRYPTO HELPERS - Password Hashing & Encryption
+// ============================================
+const ENCRYPTION_KEY_DERIVATION = 'NCPA-SOUND-OPS-KEY-2024'
+
+async function hashPassword(password: string, salt?: string): Promise<{ hash: string, salt: string }> {
+  const encoder = new TextEncoder()
+  const saltBytes = salt ? hexToBytes(salt) : crypto.getRandomValues(new Uint8Array(16))
+  
+  const keyMaterial = await crypto.subtle.importKey(
+    'raw', encoder.encode(password), 'PBKDF2', false, ['deriveBits']
+  )
+  
+  const derivedBits = await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', salt: saltBytes, iterations: 100000, hash: 'SHA-256' },
+    keyMaterial, 256
+  )
+  
+  return {
+    hash: bytesToHex(new Uint8Array(derivedBits)),
+    salt: bytesToHex(saltBytes)
+  }
+}
+
+async function verifyPassword(password: string, storedHash: string, storedSalt: string): Promise<boolean> {
+  const { hash } = await hashPassword(password, storedSalt)
+  return hash === storedHash
+}
+
+async function encryptApiKey(apiKey: string, masterPassword: string): Promise<{ encrypted: string, iv: string }> {
+  const encoder = new TextEncoder()
+  const iv = crypto.getRandomValues(new Uint8Array(12))
+  
+  const keyMaterial = await crypto.subtle.importKey(
+    'raw', encoder.encode(masterPassword + ENCRYPTION_KEY_DERIVATION), 'PBKDF2', false, ['deriveKey']
+  )
+  
+  const key = await crypto.subtle.deriveKey(
+    { name: 'PBKDF2', salt: encoder.encode('ncpa-salt'), iterations: 100000, hash: 'SHA-256' },
+    keyMaterial, { name: 'AES-GCM', length: 256 }, false, ['encrypt']
+  )
+  
+  const encrypted = await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv }, key, encoder.encode(apiKey)
+  )
+  
+  return {
+    encrypted: bytesToHex(new Uint8Array(encrypted)),
+    iv: bytesToHex(iv)
+  }
+}
+
+async function decryptApiKey(encrypted: string, iv: string, masterPassword: string): Promise<string | null> {
+  try {
+    const encoder = new TextEncoder()
+    const decoder = new TextDecoder()
+    
+    const keyMaterial = await crypto.subtle.importKey(
+      'raw', encoder.encode(masterPassword + ENCRYPTION_KEY_DERIVATION), 'PBKDF2', false, ['deriveKey']
+    )
+    
+    const key = await crypto.subtle.deriveKey(
+      { name: 'PBKDF2', salt: encoder.encode('ncpa-salt'), iterations: 100000, hash: 'SHA-256' },
+      keyMaterial, { name: 'AES-GCM', length: 256 }, false, ['decrypt']
+    )
+    
+    const decrypted = await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv: hexToBytes(iv) }, key, hexToBytes(encrypted)
+    )
+    
+    return decoder.decode(decrypted)
+  } catch {
+    return null
+  }
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('')
+}
+
+function hexToBytes(hex: string): Uint8Array {
+  const bytes = new Uint8Array(hex.length / 2)
+  for (let i = 0; i < bytes.length; i++) {
+    bytes[i] = parseInt(hex.substr(i * 2, 2), 16)
+  }
+  return bytes
+}
+
+function generateJwtSecret(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(32))
+  return bytesToHex(bytes)
+}
+
+// ============================================
 // STYLES - Teenage Engineering Dark Ops Theme
 // ============================================
 const STYLES = `
@@ -305,7 +398,17 @@ async function authMiddleware(c: any, next: () => Promise<void>) {
     return c.redirect('/login')
   }
   
-  const secret = c.env.APP_PASSWORD || 'default-secret-change-me'
+  // Get JWT secret from D1 or fallback to env
+  let secret = c.env.APP_PASSWORD || 'default-secret-change-me'
+  try {
+    const settings = await c.env.DB.prepare('SELECT jwt_secret FROM app_settings WHERE id = 1').first() as any
+    if (settings && settings.jwt_secret && settings.jwt_secret !== 'NEEDS_INIT') {
+      secret = settings.jwt_secret
+    }
+  } catch (e) {
+    // Fallback to env secret if D1 fails
+  }
+  
   const result = await verifyJWT(token, secret)
   
   if (!result.valid) {
@@ -387,27 +490,82 @@ app.get('/login', (c) => {
 app.post('/api/auth/login', async (c) => {
   const { username, password } = await c.req.json()
   
-  const validUser = c.env.APP_USERNAME || 'admin'
-  const validPass = c.env.APP_PASSWORD || 'admin123'
-  
-  if (username !== validUser || password !== validPass) {
-    return c.json({ success: false, error: 'Invalid credentials' }, 401)
+  try {
+    // Get settings from D1
+    const settings = await c.env.DB.prepare('SELECT * FROM app_settings WHERE id = 1').first() as any
+    
+    if (!settings) {
+      // Fallback to env vars if no settings in DB
+      const validUser = c.env.APP_USERNAME || 'admin'
+      const validPass = c.env.APP_PASSWORD || 'admin123'
+      
+      if (username !== validUser || password !== validPass) {
+        return c.json({ success: false, error: 'Invalid credentials' }, 401)
+      }
+      
+      const token = await createJWT(
+        { user: username, exp: Math.floor(Date.now() / 1000) + (8 * 60 * 60) },
+        validPass
+      )
+      
+      setCookie(c, 'auth_token', token, {
+        httpOnly: true, secure: true, sameSite: 'Lax', maxAge: 8 * 60 * 60, path: '/'
+      })
+      return c.json({ success: true })
+    }
+    
+    // Check if password needs initialization (first login after migration)
+    if (settings.password_hash === 'NEEDS_INIT') {
+      // Use fallback credentials for first login
+      const validUser = c.env.APP_USERNAME || 'ncpalivesound'
+      const validPass = c.env.APP_PASSWORD || 'hangover123'
+      
+      if (username !== validUser || password !== validPass) {
+        return c.json({ success: false, error: 'Invalid credentials' }, 401)
+      }
+      
+      // Initialize the password hash and JWT secret in D1
+      const { hash, salt } = await hashPassword(password)
+      const jwtSecret = generateJwtSecret()
+      await c.env.DB.prepare(
+        'UPDATE app_settings SET password_hash = ?, password_salt = ?, jwt_secret = ?, username = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1'
+      ).bind(hash, salt, jwtSecret, username).run()
+      
+      const token = await createJWT(
+        { user: username, exp: Math.floor(Date.now() / 1000) + (8 * 60 * 60) },
+        jwtSecret
+      )
+      
+      setCookie(c, 'auth_token', token, {
+        httpOnly: true, secure: true, sameSite: 'Lax', maxAge: 8 * 60 * 60, path: '/'
+      })
+      return c.json({ success: true })
+    }
+    
+    // Normal login - verify against D1
+    if (username !== settings.username) {
+      return c.json({ success: false, error: 'Invalid credentials' }, 401)
+    }
+    
+    const passwordValid = await verifyPassword(password, settings.password_hash, settings.password_salt)
+    if (!passwordValid) {
+      return c.json({ success: false, error: 'Invalid credentials' }, 401)
+    }
+    
+    const token = await createJWT(
+      { user: username, exp: Math.floor(Date.now() / 1000) + (8 * 60 * 60) },
+      settings.jwt_secret
+    )
+    
+    setCookie(c, 'auth_token', token, {
+      httpOnly: true, secure: true, sameSite: 'Lax', maxAge: 8 * 60 * 60, path: '/'
+    })
+    
+    return c.json({ success: true })
+  } catch (error: any) {
+    console.error('Login error:', error)
+    return c.json({ success: false, error: 'Login failed' }, 500)
   }
-  
-  const token = await createJWT(
-    { user: username, exp: Math.floor(Date.now() / 1000) + (8 * 60 * 60) }, // 8 hours
-    validPass
-  )
-  
-  setCookie(c, 'auth_token', token, {
-    httpOnly: true,
-    secure: true,
-    sameSite: 'Lax',
-    maxAge: 8 * 60 * 60,
-    path: '/'
-  })
-  
-  return c.json({ success: true })
 })
 
 app.post('/api/auth/logout', (c) => {
@@ -806,6 +964,140 @@ app.delete('/api/equipment/:id', async (c) => {
 })
 
 // ============================================
+// SETTINGS API
+// ============================================
+app.get('/api/settings', async (c) => {
+  try {
+    const settings = await c.env.DB.prepare('SELECT username, anthropic_api_key, api_key_iv, updated_at FROM app_settings WHERE id = 1').first() as any
+    
+    if (!settings) {
+      return c.json({ success: true, data: { username: 'ncpalivesound', hasApiKey: false } })
+    }
+    
+    return c.json({ 
+      success: true, 
+      data: { 
+        username: settings.username,
+        hasApiKey: !!settings.anthropic_api_key && settings.anthropic_api_key !== '',
+        updatedAt: settings.updated_at
+      } 
+    })
+  } catch (error: any) {
+    return c.json({ success: false, error: error.message }, 500)
+  }
+})
+
+app.post('/api/settings/update', async (c) => {
+  try {
+    const { currentPassword, newUsername, newPassword, anthropicApiKey } = await c.req.json()
+    
+    // Get current settings
+    const settings = await c.env.DB.prepare('SELECT * FROM app_settings WHERE id = 1').first() as any
+    
+    if (!settings) {
+      return c.json({ success: false, error: 'Settings not initialized' }, 400)
+    }
+    
+    // Verify current password
+    if (settings.password_hash === 'NEEDS_INIT') {
+      // First-time setup - use env vars
+      const validPass = c.env.APP_PASSWORD || 'hangover123'
+      if (currentPassword !== validPass) {
+        return c.json({ success: false, error: 'Current password is incorrect' }, 401)
+      }
+    } else {
+      const passwordValid = await verifyPassword(currentPassword, settings.password_hash, settings.password_salt)
+      if (!passwordValid) {
+        return c.json({ success: false, error: 'Current password is incorrect' }, 401)
+      }
+    }
+    
+    // Prepare updates
+    const updates: string[] = []
+    const values: any[] = []
+    
+    // Update username if provided
+    if (newUsername && newUsername.trim() !== '') {
+      updates.push('username = ?')
+      values.push(newUsername.trim())
+    }
+    
+    // Update password if provided (also regenerate JWT secret)
+    let passwordForEncryption = currentPassword
+    if (newPassword && newPassword.trim() !== '') {
+      const { hash, salt } = await hashPassword(newPassword)
+      const newJwtSecret = generateJwtSecret()
+      updates.push('password_hash = ?', 'password_salt = ?', 'jwt_secret = ?')
+      values.push(hash, salt, newJwtSecret)
+      passwordForEncryption = newPassword
+    }
+    
+    // Update API key if provided
+    if (anthropicApiKey !== undefined) {
+      if (anthropicApiKey === '' || anthropicApiKey === null) {
+        // Clear API key
+        updates.push('anthropic_api_key = ?', 'api_key_iv = ?')
+        values.push(null, null)
+      } else {
+        // Encrypt and store API key
+        const { encrypted, iv } = await encryptApiKey(anthropicApiKey, passwordForEncryption)
+        updates.push('anthropic_api_key = ?', 'api_key_iv = ?')
+        values.push(encrypted, iv)
+      }
+    }
+    
+    if (updates.length === 0) {
+      return c.json({ success: false, error: 'No changes to save' }, 400)
+    }
+    
+    updates.push('updated_at = CURRENT_TIMESTAMP')
+    values.push(1) // for WHERE id = 1
+    
+    const query = `UPDATE app_settings SET ${updates.join(', ')} WHERE id = ?`
+    await c.env.DB.prepare(query).bind(...values).run()
+    
+    // If password changed, user needs to re-login
+    if (newPassword && newPassword.trim() !== '') {
+      setCookie(c, 'auth_token', '', { maxAge: 0, path: '/' })
+      return c.json({ success: true, message: 'Settings updated. Please login with your new password.', requireRelogin: true })
+    }
+    
+    return c.json({ success: true, message: 'Settings updated successfully' })
+  } catch (error: any) {
+    console.error('Settings update error:', error)
+    return c.json({ success: false, error: error.message }, 500)
+  }
+})
+
+// Get decrypted API key (for internal use)
+app.post('/api/settings/get-api-key', async (c) => {
+  try {
+    const { password } = await c.req.json()
+    
+    const settings = await c.env.DB.prepare('SELECT * FROM app_settings WHERE id = 1').first() as any
+    
+    if (!settings || !settings.anthropic_api_key || !settings.api_key_iv) {
+      return c.json({ success: false, error: 'No API key configured' }, 404)
+    }
+    
+    // Verify password first
+    const passwordValid = await verifyPassword(password, settings.password_hash, settings.password_salt)
+    if (!passwordValid) {
+      return c.json({ success: false, error: 'Invalid password' }, 401)
+    }
+    
+    const apiKey = await decryptApiKey(settings.anthropic_api_key, settings.api_key_iv, password)
+    if (!apiKey) {
+      return c.json({ success: false, error: 'Failed to decrypt API key' }, 500)
+    }
+    
+    return c.json({ success: true, apiKey })
+  } catch (error: any) {
+    return c.json({ success: false, error: error.message }, 500)
+  }
+})
+
+// ============================================
 // MAIN UI
 // ============================================
 app.get('/', (c) => {
@@ -816,6 +1108,7 @@ app.get('/schedule', (c) => c.html(MainApp('schedule')))
 app.get('/crew', (c) => c.html(MainApp('crew')))
 app.get('/quotes', (c) => c.html(MainApp('quotes')))
 app.get('/equipment', (c) => c.html(MainApp('equipment')))
+app.get('/settings', (c) => c.html(MainApp('settings')))
 
 function MainApp(activeTab = 'schedule') {
   return `
@@ -832,7 +1125,10 @@ function MainApp(activeTab = 'schedule') {
       <div class="container">
         <header class="flex flex-between flex-center mb-2">
           <h1 style="font-size:1rem;color:#f59e0b;font-weight:600;">NCPA SOUND OPS</h1>
-          <button onclick="logout()" class="text-sm">Logout</button>
+          <div class="flex gap-1 flex-center">
+            <a href="/settings" class="nav-link ${activeTab === 'settings' ? 'active' : ''}" style="padding:0.4rem 0.75rem;" title="Settings">⚙️</a>
+            <button onclick="logout()" class="text-sm">Logout</button>
+          </div>
         </header>
         
         <nav class="nav">
@@ -1789,6 +2085,162 @@ function MainApp(activeTab = 'schedule') {
         }
         
         // ============================================
+        // SETTINGS MODULE
+        // ============================================
+        let settingsData = { username: '', hasApiKey: false };
+        
+        async function loadSettings() {
+          const res = await api('/api/settings');
+          if (res.success) {
+            settingsData = res.data;
+          }
+          renderSettings();
+        }
+        
+        function renderSettings() {
+          document.getElementById('app').innerHTML = \`
+            <div class="card" style="max-width:600px;">
+              <div class="card-header">⚙️ App Settings</div>
+              <p class="text-sm text-muted mb-2">Manage your login credentials and API keys. Changes take effect immediately.</p>
+              
+              <form id="settingsForm" onsubmit="saveSettings(event)">
+                <div class="mb-2">
+                  <label class="text-sm text-muted">Username</label>
+                  <input type="text" name="newUsername" value="\${settingsData.username || ''}" placeholder="Enter username" />
+                </div>
+                
+                <hr style="border-color:#262626;margin:1.5rem 0;" />
+                
+                <div class="mb-2">
+                  <label class="text-sm text-muted">Current Password <span class="text-danger">*</span></label>
+                  <input type="password" name="currentPassword" required placeholder="Required to save changes" autocomplete="current-password" />
+                </div>
+                
+                <div class="mb-2">
+                  <label class="text-sm text-muted">New Password <span class="text-muted">(optional)</span></label>
+                  <input type="password" name="newPassword" placeholder="Leave blank to keep current" autocomplete="new-password" />
+                </div>
+                
+                <div class="mb-2">
+                  <label class="text-sm text-muted">Confirm New Password</label>
+                  <input type="password" name="confirmPassword" placeholder="Confirm new password" autocomplete="new-password" />
+                </div>
+                
+                <hr style="border-color:#262626;margin:1.5rem 0;" />
+                
+                <div class="mb-2">
+                  <label class="text-sm text-muted">Anthropic API Key</label>
+                  <div class="flex gap-1">
+                    <input type="password" name="anthropicApiKey" id="apiKeyInput"
+                           placeholder="\${settingsData.hasApiKey ? '••••••••••••••••••••••• (key saved)' : 'sk-ant-...'}" 
+                           style="flex:1;" />
+                    <button type="button" onclick="toggleApiKeyVisibility()" style="width:80px;">Show</button>
+                  </div>
+                  <p class="text-sm text-muted" style="margin-top:0.5rem;">
+                    \${settingsData.hasApiKey 
+                      ? '✅ API key is configured. Leave blank to keep current key, or enter new key to replace.'
+                      : '⚠️ No API key configured. Word document AI parsing will not work.'}
+                  </p>
+                </div>
+                
+                <div id="settingsError" class="text-danger text-sm mb-2" style="display:none;"></div>
+                <div id="settingsSuccess" class="text-success text-sm mb-2" style="display:none;"></div>
+                
+                <button type="submit" class="primary" style="width:100%;padding:0.75rem;">Save Settings</button>
+              </form>
+            </div>
+            
+            <div class="card" style="max-width:600px;margin-top:1rem;">
+              <div class="card-header">ℹ️ About Settings</div>
+              <ul class="text-sm text-muted" style="list-style:disc;padding-left:1.5rem;line-height:1.8;">
+                <li>Credentials are stored securely in the database (passwords are hashed)</li>
+                <li>API keys are encrypted before storage</li>
+                <li>If you change your password, you'll need to re-login</li>
+                <li>The Anthropic API key is required for AI-powered Word document parsing</li>
+              </ul>
+            </div>
+          \`;
+        }
+        
+        function toggleApiKeyVisibility() {
+          const input = document.getElementById('apiKeyInput');
+          if (input.type === 'password') {
+            input.type = 'text';
+            event.target.textContent = 'Hide';
+          } else {
+            input.type = 'password';
+            event.target.textContent = 'Show';
+          }
+        }
+        
+        async function saveSettings(e) {
+          e.preventDefault();
+          const form = e.target;
+          const errorDiv = document.getElementById('settingsError');
+          const successDiv = document.getElementById('settingsSuccess');
+          
+          errorDiv.style.display = 'none';
+          successDiv.style.display = 'none';
+          
+          const newPassword = form.newPassword.value;
+          const confirmPassword = form.confirmPassword.value;
+          
+          // Validate passwords match
+          if (newPassword && newPassword !== confirmPassword) {
+            errorDiv.textContent = 'New passwords do not match';
+            errorDiv.style.display = 'block';
+            return;
+          }
+          
+          // Validate password strength
+          if (newPassword && newPassword.length < 6) {
+            errorDiv.textContent = 'New password must be at least 6 characters';
+            errorDiv.style.display = 'block';
+            return;
+          }
+          
+          const data = {
+            currentPassword: form.currentPassword.value,
+            newUsername: form.newUsername.value,
+            newPassword: newPassword || undefined,
+            anthropicApiKey: form.anthropicApiKey.value || undefined
+          };
+          
+          // Don't send empty API key if we're not changing it
+          if (form.anthropicApiKey.value === '') {
+            delete data.anthropicApiKey;
+          }
+          
+          try {
+            const res = await api('/api/settings/update', {
+              method: 'POST',
+              body: JSON.stringify(data)
+            });
+            
+            if (res.success) {
+              if (res.requireRelogin) {
+                alert(res.message);
+                window.location.href = '/login';
+              } else {
+                successDiv.textContent = res.message;
+                successDiv.style.display = 'block';
+                form.currentPassword.value = '';
+                form.newPassword.value = '';
+                form.confirmPassword.value = '';
+                form.anthropicApiKey.value = '';
+                loadSettings();
+              }
+            } else {
+              errorDiv.textContent = res.error || 'Failed to save settings';
+              errorDiv.style.display = 'block';
+            }
+          } catch (err) {
+            errorDiv.textContent = 'Network error';
+            errorDiv.style.display = 'block';
+          }
+        }
+        
+        // ============================================
         // INIT
         // ============================================
         document.addEventListener('click', (e) => {
@@ -1803,6 +2255,7 @@ function MainApp(activeTab = 'schedule') {
         else if (activeTab === 'crew') loadCrew();
         else if (activeTab === 'quotes') loadQuotes();
         else if (activeTab === 'equipment') loadEquipment();
+        else if (activeTab === 'settings') loadSettings();
         else loadSchedule();
       </script>
     </body>
