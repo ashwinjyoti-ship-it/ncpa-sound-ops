@@ -964,6 +964,251 @@ app.delete('/api/equipment/:id', async (c) => {
 })
 
 // ============================================
+// WORD DOCUMENT PARSING API
+// ============================================
+
+// Helper to extract text from DOCX XML
+function extractTextFromDocxXml(xmlContent: string): string {
+  const textParts: string[] = []
+  // Simple regex to extract text between XML tags
+  const regex = /<w:t[^>]*>([^<]*)<\/w:t>/g
+  let match
+  while ((match = regex.exec(xmlContent)) !== null) {
+    if (match[1]) textParts.push(match[1])
+  }
+  return textParts.join(' ')
+}
+
+// Parse Word document and extract equipment data using Anthropic AI
+app.post('/api/equipment/parse-docx', async (c) => {
+  try {
+    const { documentContent, useAI } = await c.req.json()
+    
+    if (!documentContent) {
+      return c.json({ success: false, error: 'No document content provided' }, 400)
+    }
+    
+    // First, try to parse without AI (basic extraction)
+    const extractedText = documentContent
+    
+    // Try basic parsing (looking for patterns like "ITEM NAME" followed by a number)
+    const lines = extractedText.split(/[\n\r]+/).filter((l: string) => l.trim())
+    const basicParsedItems: { name: string, rate: number }[] = []
+    
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i].trim()
+      // Skip headers
+      if (line.match(/^(S\.?No|ITEM|RATE|Rs\.?)/i)) continue
+      
+      // Try to match "NAME" followed by "RATE" pattern
+      const nameRateMatch = line.match(/^(.+?)\s+(\d{2,5})$/)
+      if (nameRateMatch) {
+        const name = nameRateMatch[1].trim().toUpperCase()
+        const rate = parseInt(nameRateMatch[2])
+        if (name && rate && rate >= 100 && rate <= 50000) {
+          basicParsedItems.push({ name, rate })
+        }
+      }
+    }
+    
+    // If we found items without AI, return them
+    if (basicParsedItems.length > 0 && !useAI) {
+      return c.json({ 
+        success: true, 
+        items: basicParsedItems, 
+        method: 'basic',
+        message: `Found ${basicParsedItems.length} equipment items using basic parsing`
+      })
+    }
+    
+    // If useAI is requested, use Anthropic API
+    if (useAI) {
+      // Get the Anthropic API key from database
+      const settings = await c.env.DB.prepare(
+        'SELECT anthropic_api_key, api_key_iv, password_hash, password_salt FROM app_settings WHERE id = 1'
+      ).first() as any
+      
+      if (!settings || !settings.anthropic_api_key || !settings.api_key_iv) {
+        return c.json({ 
+          success: false, 
+          error: 'No Anthropic API key configured. Please add your API key in Settings to enable AI-powered Word parsing.',
+          requiresApiKey: true
+        }, 400)
+      }
+      
+      // For AI parsing, we need the user's password to decrypt the API key
+      // This is handled client-side where user provides password for AI parsing
+      const { password } = await c.req.json()
+      
+      if (!password) {
+        return c.json({ 
+          success: false, 
+          error: 'Password required for AI parsing',
+          requiresPassword: true
+        }, 400)
+      }
+      
+      // Verify password
+      const passwordValid = await verifyPassword(password, settings.password_hash, settings.password_salt)
+      if (!passwordValid) {
+        return c.json({ success: false, error: 'Invalid password' }, 401)
+      }
+      
+      // Decrypt the API key
+      const apiKey = await decryptApiKey(settings.anthropic_api_key, settings.api_key_iv, password)
+      if (!apiKey) {
+        return c.json({ success: false, error: 'Failed to decrypt API key. Please re-enter your API key in Settings.' }, 500)
+      }
+      
+      // Call Anthropic API
+      try {
+        const anthropicResponse = await fetch('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': apiKey,
+            'anthropic-version': '2023-06-01'
+          },
+          body: JSON.stringify({
+            model: 'claude-3-haiku-20240307',
+            max_tokens: 4096,
+            messages: [{
+              role: 'user',
+              content: `Parse this equipment rate chart and extract equipment items with their rates. Return ONLY a valid JSON array with objects having "name" (string, uppercase) and "rate" (number in rupees). No explanation, just the JSON array.
+
+Text to parse:
+${extractedText}
+
+Example output format:
+[{"name": "SHURE SM58", "rate": 300}, {"name": "DI BOX", "rate": 250}]`
+            }]
+          })
+        })
+        
+        if (!anthropicResponse.ok) {
+          const errorText = await anthropicResponse.text()
+          console.error('Anthropic API error:', errorText)
+          return c.json({ 
+            success: false, 
+            error: 'Anthropic API call failed. Please check your API key in Settings.',
+            details: anthropicResponse.status
+          }, 500)
+        }
+        
+        const anthropicData = await anthropicResponse.json() as any
+        const assistantMessage = anthropicData.content?.[0]?.text || ''
+        
+        // Parse the JSON response
+        const jsonMatch = assistantMessage.match(/\[[\s\S]*\]/)
+        if (!jsonMatch) {
+          return c.json({ 
+            success: false, 
+            error: 'Could not parse AI response. Please try again or use manual entry.' 
+          }, 500)
+        }
+        
+        const parsedItems = JSON.parse(jsonMatch[0])
+        
+        // Validate and clean the parsed items
+        const validItems = parsedItems
+          .filter((item: any) => item.name && typeof item.rate === 'number' && item.rate > 0)
+          .map((item: any) => ({
+            name: String(item.name).toUpperCase().trim(),
+            rate: Math.round(item.rate)
+          }))
+        
+        return c.json({ 
+          success: true, 
+          items: validItems, 
+          method: 'ai',
+          message: `AI successfully extracted ${validItems.length} equipment items`
+        })
+        
+      } catch (apiError: any) {
+        console.error('AI parsing error:', apiError)
+        return c.json({ 
+          success: false, 
+          error: 'AI parsing failed: ' + apiError.message 
+        }, 500)
+      }
+    }
+    
+    // No items found and AI not requested
+    if (basicParsedItems.length === 0) {
+      return c.json({ 
+        success: false, 
+        error: 'Could not extract equipment data. Try enabling AI parsing for better results.',
+        items: [],
+        suggestAI: true
+      }, 400)
+    }
+    
+    return c.json({ 
+      success: true, 
+      items: basicParsedItems,
+      method: 'basic'
+    })
+    
+  } catch (error: any) {
+    console.error('Document parsing error:', error)
+    return c.json({ success: false, error: error.message }, 500)
+  }
+})
+
+// Import multiple equipment items at once
+app.post('/api/equipment/bulk-import', async (c) => {
+  try {
+    const { items } = await c.req.json()
+    
+    if (!items || !Array.isArray(items) || items.length === 0) {
+      return c.json({ success: false, error: 'No items to import' }, 400)
+    }
+    
+    const results = { imported: 0, skipped: 0, errors: [] as string[] }
+    
+    for (const item of items) {
+      try {
+        if (!item.name || !item.rate) {
+          results.skipped++
+          continue
+        }
+        
+        // Check if equipment already exists (by name)
+        const existing = await c.env.DB.prepare(
+          'SELECT id FROM equipment WHERE UPPER(name) = ?'
+        ).bind(item.name.toUpperCase()).first()
+        
+        if (existing) {
+          // Update existing
+          await c.env.DB.prepare(
+            'UPDATE equipment SET rate = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?'
+          ).bind(item.rate, existing.id).run()
+          results.imported++
+        } else {
+          // Insert new
+          await c.env.DB.prepare(
+            'INSERT INTO equipment (name, rate) VALUES (?, ?)'
+          ).bind(item.name.toUpperCase(), item.rate).run()
+          results.imported++
+        }
+      } catch (itemError: any) {
+        results.errors.push(`${item.name}: ${itemError.message}`)
+        results.skipped++
+      }
+    }
+    
+    return c.json({ 
+      success: true, 
+      message: `Imported ${results.imported} items, skipped ${results.skipped}`,
+      ...results 
+    })
+    
+  } catch (error: any) {
+    return c.json({ success: false, error: error.message }, 500)
+  }
+})
+
+// ============================================
 // SETTINGS API
 // ============================================
 app.get('/api/settings', async (c) => {
@@ -1119,6 +1364,7 @@ function MainApp(activeTab = 'schedule') {
       <meta name="viewport" content="width=device-width, initial-scale=1.0">
       <title>NCPA Sound Ops</title>
       <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600&display=swap" rel="stylesheet">
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
       <style>${STYLES}</style>
     </head>
     <body>
@@ -2012,6 +2258,29 @@ function MainApp(activeTab = 'schedule') {
         function renderEquipment() {
           document.getElementById('app').innerHTML = \`
             <div class="card">
+              <div class="card-header">📄 Import from Word Document</div>
+              <div style="padding:1rem;">
+                <p class="text-muted text-sm mb-2">Upload a Word document (.docx) containing your equipment rate chart. AI will automatically extract equipment names and rates.</p>
+                <div class="flex gap-2 flex-center" style="flex-wrap:wrap;">
+                  <input type="file" id="docxUpload" accept=".docx" style="flex:1;min-width:200px;" />
+                  <label class="flex flex-center gap-1" style="cursor:pointer;">
+                    <input type="checkbox" id="useAICheck" checked />
+                    <span class="text-sm">Use AI Parsing</span>
+                  </label>
+                  <button onclick="parseDocx()" class="primary">📤 Parse Document</button>
+                </div>
+                <div id="parseStatus" class="mt-2" style="display:none;"></div>
+                <div id="parsedItems" style="display:none;margin-top:1rem;">
+                  <div class="flex flex-between flex-center mb-2">
+                    <span class="text-accent">Parsed Equipment Items</span>
+                    <button onclick="importParsedItems()" class="primary">✅ Import All</button>
+                  </div>
+                  <div id="parsedItemsList"></div>
+                </div>
+              </div>
+            </div>
+            
+            <div class="card">
               <div class="card-header">Add New Equipment</div>
               <form id="equipmentForm" onsubmit="addEquipment(event)" class="grid grid-2 gap-2">
                 <div>
@@ -2046,6 +2315,160 @@ function MainApp(activeTab = 'schedule') {
               </div>
             </div>
           \`;
+        }
+        
+        // Store parsed items for import
+        let parsedEquipmentItems = [];
+        
+        async function parseDocx() {
+          const fileInput = document.getElementById('docxUpload');
+          const useAI = document.getElementById('useAICheck').checked;
+          const statusDiv = document.getElementById('parseStatus');
+          const parsedDiv = document.getElementById('parsedItems');
+          const listDiv = document.getElementById('parsedItemsList');
+          
+          if (!fileInput.files || !fileInput.files[0]) {
+            statusDiv.innerHTML = '<span class="text-danger">Please select a .docx file</span>';
+            statusDiv.style.display = 'block';
+            return;
+          }
+          
+          const file = fileInput.files[0];
+          if (!file.name.endsWith('.docx')) {
+            statusDiv.innerHTML = '<span class="text-danger">Please select a valid .docx file</span>';
+            statusDiv.style.display = 'block';
+            return;
+          }
+          
+          statusDiv.innerHTML = '<span class="text-muted">📂 Reading document...</span>';
+          statusDiv.style.display = 'block';
+          parsedDiv.style.display = 'none';
+          
+          try {
+            // Read the DOCX file and extract text content
+            const zip = await JSZip.loadAsync(file);
+            const documentXml = await zip.file('word/document.xml').async('string');
+            
+            // Extract text from XML
+            const textContent = documentXml.replace(/<w:t[^>]*>([^<]*)<\\/w:t>/g, '$1\\n')
+                                          .replace(/<[^>]+>/g, '')
+                                          .replace(/&lt;/g, '<')
+                                          .replace(/&gt;/g, '>')
+                                          .replace(/&amp;/g, '&');
+            
+            statusDiv.innerHTML = '<span class="text-muted">🔍 Parsing equipment data' + (useAI ? ' with AI' : '') + '...</span>';
+            
+            // Prepare request body
+            let body = { documentContent: textContent, useAI: useAI };
+            
+            // If using AI, we need the user's password
+            if (useAI) {
+              const password = prompt('Enter your password to use AI parsing (required to access API key):');
+              if (!password) {
+                statusDiv.innerHTML = '<span class="text-warning">AI parsing cancelled. Trying basic parsing...</span>';
+                body.useAI = false;
+              } else {
+                body.password = password;
+              }
+            }
+            
+            const res = await api('/api/equipment/parse-docx', {
+              method: 'POST',
+              body: JSON.stringify(body)
+            });
+            
+            if (!res.success) {
+              if (res.requiresApiKey) {
+                statusDiv.innerHTML = '<span class="text-warning">⚠️ ' + res.error + '</span><br><a href="/settings" class="text-accent">Go to Settings</a>';
+              } else if (res.suggestAI) {
+                statusDiv.innerHTML = '<span class="text-warning">⚠️ ' + res.error + '</span>';
+              } else {
+                statusDiv.innerHTML = '<span class="text-danger">❌ ' + (res.error || 'Failed to parse document') + '</span>';
+              }
+              return;
+            }
+            
+            parsedEquipmentItems = res.items || [];
+            
+            if (parsedEquipmentItems.length === 0) {
+              statusDiv.innerHTML = '<span class="text-warning">No equipment items found in the document</span>';
+              return;
+            }
+            
+            statusDiv.innerHTML = '<span class="text-success">✅ ' + res.message + ' (Method: ' + res.method + ')</span>';
+            
+            // Display parsed items
+            listDiv.innerHTML = parsedEquipmentItems.map((item, idx) => \`
+              <div class="flex flex-between flex-center" style="padding:0.5rem;border-bottom:1px solid #262626;">
+                <div>
+                  <input type="checkbox" id="importItem\${idx}" checked style="margin-right:0.5rem;" />
+                  <span class="text-accent">\${item.name}</span>
+                  <span class="text-muted" style="margin-left:1rem;">Rs. \${item.rate}</span>
+                </div>
+                <button onclick="removeFromParsed(\${idx})" class="text-sm text-danger">✕</button>
+              </div>
+            \`).join('');
+            
+            parsedDiv.style.display = 'block';
+            
+          } catch (error) {
+            console.error('Parse error:', error);
+            statusDiv.innerHTML = '<span class="text-danger">❌ Error parsing document: ' + error.message + '</span>';
+          }
+        }
+        
+        function removeFromParsed(idx) {
+          parsedEquipmentItems.splice(idx, 1);
+          const listDiv = document.getElementById('parsedItemsList');
+          if (parsedEquipmentItems.length === 0) {
+            document.getElementById('parsedItems').style.display = 'none';
+            document.getElementById('parseStatus').innerHTML = '<span class="text-muted">All items removed</span>';
+            return;
+          }
+          listDiv.innerHTML = parsedEquipmentItems.map((item, idx) => \`
+            <div class="flex flex-between flex-center" style="padding:0.5rem;border-bottom:1px solid #262626;">
+              <div>
+                <input type="checkbox" id="importItem\${idx}" checked style="margin-right:0.5rem;" />
+                <span class="text-accent">\${item.name}</span>
+                <span class="text-muted" style="margin-left:1rem;">Rs. \${item.rate}</span>
+              </div>
+              <button onclick="removeFromParsed(\${idx})" class="text-sm text-danger">✕</button>
+            </div>
+          \`).join('');
+        }
+        
+        async function importParsedItems() {
+          // Filter to only checked items
+          const itemsToImport = parsedEquipmentItems.filter((_, idx) => {
+            const checkbox = document.getElementById('importItem' + idx);
+            return checkbox && checkbox.checked;
+          });
+          
+          if (itemsToImport.length === 0) {
+            alert('No items selected for import');
+            return;
+          }
+          
+          const statusDiv = document.getElementById('parseStatus');
+          statusDiv.innerHTML = '<span class="text-muted">📥 Importing ' + itemsToImport.length + ' items...</span>';
+          
+          try {
+            const res = await api('/api/equipment/bulk-import', {
+              method: 'POST',
+              body: JSON.stringify({ items: itemsToImport })
+            });
+            
+            if (res.success) {
+              statusDiv.innerHTML = '<span class="text-success">✅ ' + res.message + '</span>';
+              document.getElementById('parsedItems').style.display = 'none';
+              parsedEquipmentItems = [];
+              loadEquipment(); // Refresh the equipment list
+            } else {
+              statusDiv.innerHTML = '<span class="text-danger">❌ ' + (res.error || 'Import failed') + '</span>';
+            }
+          } catch (error) {
+            statusDiv.innerHTML = '<span class="text-danger">❌ Import error: ' + error.message + '</span>';
+          }
         }
         
         async function addEquipment(e) {
