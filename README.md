@@ -8,7 +8,6 @@ Unified internal operations application for NCPA Sound department.
 - Calendar view with month navigation
 - Event management (CRUD)
 - Search and filtering
-- Word document upload (planned)
 - WhatsApp export (planned)
 
 ### 👥 Crew Assignment Module
@@ -28,6 +27,19 @@ Unified internal operations application for NCPA Sound department.
 - GST calculation (18%)
 - Copy as HTML/rich text
 - Equipment management CRUD
+
+### 📄 Word Document Parsing (AI-Powered)
+- Upload Word documents (.docx) containing equipment rate charts
+- **AI Parsing**: Uses Anthropic Claude API to intelligently extract equipment names and rates
+- **Basic Parsing**: Fallback regex-based parsing for simple formats
+- Bulk import parsed items with duplicate detection
+- Requires Anthropic API key (configured in Settings page)
+- Flow:
+  1. Go to Manage Equipment page
+  2. Upload your rate chart Word document
+  3. Enable "Use AI Parsing" for best results
+  4. Review extracted items
+  5. Import selected items to database
 
 ## Tech Stack
 
