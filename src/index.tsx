@@ -950,7 +950,7 @@ function renderCalendar(month) {
         const isUnavail = unavailData[cr.id]?.has(date)
         const isToday = date === today
         html += '<div class="cal-cell' + (isUnavail?' unavail':'') + (isToday?' today':'') + '" '
-             + 'onclick="toggleUnavail(' + cr.id + ',\'' + date + '\')" '
+             + 'onclick="toggleUnavail(' + cr.id + ',\\'' + date + '\\')" '
              + 'title="' + esc(cr.name) + ' ' + date + '">'
              + (isUnavail ? '✗' : '') + '</div>'
       } else {
