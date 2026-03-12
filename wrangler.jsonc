@@ -1,0 +1,19 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "ncpa-sound-ops",
+  "compatibility_date": "2025-10-24",
+  "pages_build_output_dir": "./dist",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "ncpa-ops-db",
+      "database_id": "YOUR_DB_ID_HERE"
+    }
+  ],
+  "ai": {
+    "binding": "AI"
+  }
+}
