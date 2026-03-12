@@ -230,6 +230,7 @@ const HTML = `<!DOCTYPE html>
     <div class="user-info">
       <span id="user-email-display"></span>
       <span class="role-badge" id="user-role-display"></span>
+      <button class="btn-secondary btn-sm" id="settings-nav" onclick="switchTab('settings',null)">⚙ Settings</button>
       <button class="btn-secondary btn-sm" onclick="doLogout()">Sign out</button>
     </div>
   </header>
@@ -403,6 +404,33 @@ const HTML = `<!DOCTYPE html>
       </div>
     </div>
 
+    <!-- ============ SETTINGS TAB ============ -->
+    <div id="tab-settings" class="tab-panel">
+      <div class="row" style="margin-bottom:16px">
+        <div>
+          <h2 style="font-size:18px;font-weight:700">Settings</h2>
+          <p class="text-muted text-sm">Manage your account</p>
+        </div>
+      </div>
+
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-title">👤 Your Account</div>
+          <div class="field"><label>Email</label><input id="settings-email" type="text" disabled style="opacity:.6"></div>
+          <div class="field"><label>Role</label><input id="settings-role" type="text" disabled style="opacity:.6"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">🔑 Change Password</div>
+          <div id="pw-alert" style="display:none"></div>
+          <div class="field"><label>Current Password</label><input id="pw-current" type="password" placeholder="••••••••"></div>
+          <div class="field"><label>New Password</label><input id="pw-new" type="password" placeholder="••••••••"></div>
+          <div class="field"><label>Confirm New Password</label><input id="pw-confirm" type="password" placeholder="••••••••"></div>
+          <button class="btn-primary" onclick="changePassword()">Update Password</button>
+        </div>
+      </div>
+    </div>
+
   </main>
 </div>
 
@@ -459,12 +487,13 @@ function switchTab(tab, btn) {
   document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'))
   document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'))
   document.getElementById('tab-' + tab).classList.add('active')
-  btn.classList.add('active')
+  if (btn) btn.classList.add('active')
 
   if (tab === 'sound-manager') loadSoundEvents()
   if (tab === 'workload') loadWorkload()
   if (tab === 'admin') loadAdminUsers()
   if (tab === 'crew-mgmt') loadCrewList()
+  if (tab === 'settings') loadSettings()
 }
 
 function switchInnerTab(show, hide, btn) {
@@ -1033,6 +1062,54 @@ async function rejectUser(id) {
 async function initAuth() {
   const res = await api('POST', '/api/auth/init')
   setHtml('init-status', alertHtml(res.success ? 'success' : 'error', res.message || res.error))
+}
+
+// ============================================================
+// SETTINGS
+// ============================================================
+function loadSettings() {
+  document.getElementById('settings-email').value = currentUser.email
+  document.getElementById('settings-role').value = currentUser.role
+  document.getElementById('pw-current').value = ''
+  document.getElementById('pw-new').value = ''
+  document.getElementById('pw-confirm').value = ''
+  hide('pw-alert')
+}
+
+async function changePassword() {
+  const current = document.getElementById('pw-current').value
+  const newPw = document.getElementById('pw-new').value
+  const confirm = document.getElementById('pw-confirm').value
+  const alertEl = document.getElementById('pw-alert')
+
+  if (!current || !newPw || !confirm) {
+    alertEl.innerHTML = alertHtml('error', 'All fields are required.')
+    show('pw-alert'); return
+  }
+  if (newPw !== confirm) {
+    alertEl.innerHTML = alertHtml('error', 'New passwords do not match.')
+    show('pw-alert'); return
+  }
+  if (newPw.length < 8) {
+    alertEl.innerHTML = alertHtml('error', 'New password must be at least 8 characters.')
+    show('pw-alert'); return
+  }
+
+  try {
+    const res = await api('POST', '/api/auth/change-password', { currentPassword: current, newPassword: newPw })
+    if (res.success) {
+      alertEl.innerHTML = alertHtml('success', 'Password changed successfully.')
+      document.getElementById('pw-current').value = ''
+      document.getElementById('pw-new').value = ''
+      document.getElementById('pw-confirm').value = ''
+    } else {
+      alertEl.innerHTML = alertHtml('error', res.error || 'Failed to change password.')
+    }
+    show('pw-alert')
+  } catch(e) {
+    alertEl.innerHTML = alertHtml('error', 'Network error.')
+    show('pw-alert')
+  }
 }
 
 // ============================================================
