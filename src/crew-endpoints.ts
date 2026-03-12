@@ -177,17 +177,11 @@ export function setupCrewEndpoints(app: Hono<{ Bindings: Bindings }>) {
   app.post('/api/unavailability/bulk', async (c) => {
     const { DB } = c.env
     const { entries } = await c.req.json()
-    for (const entry of entries) {
-      if (entry.action === 'add') {
-        await DB.prepare(
-          'INSERT OR IGNORE INTO crew_unavailability (crew_id, unavailable_date) VALUES (?, ?)'
-        ).bind(entry.crew_id, entry.unavailable_date).run()
-      } else {
-        await DB.prepare(
-          'DELETE FROM crew_unavailability WHERE crew_id = ? AND unavailable_date = ?'
-        ).bind(entry.crew_id, entry.unavailable_date).run()
-      }
-    }
+    await Promise.all(entries.map((entry: any) =>
+      entry.action === 'add'
+        ? DB.prepare('INSERT OR IGNORE INTO crew_unavailability (crew_id, unavailable_date) VALUES (?, ?)').bind(entry.crew_id, entry.unavailable_date).run()
+        : DB.prepare('DELETE FROM crew_unavailability WHERE crew_id = ? AND unavailable_date = ?').bind(entry.crew_id, entry.unavailable_date).run()
+    ))
     return c.json({ success: true })
   })
 
@@ -302,6 +296,7 @@ export function setupCrewEndpoints(app: Hono<{ Bindings: Bindings }>) {
       venue_capabilities: JSON.parse(cr.venue_capabilities),
       vertical_capabilities: JSON.parse(cr.vertical_capabilities)
     })) as CrewMember[]
+    const crewMap = new Map<number, CrewMember>(crew.map(cr => [cr.id, cr]))
 
     const currentMonth = events[0]?.event_date?.substring(0, 7) || new Date().toISOString().substring(0, 7)
     const [year, monthNum] = currentMonth.split('-').map(Number)
@@ -335,8 +330,8 @@ export function setupCrewEndpoints(app: Hono<{ Bindings: Bindings }>) {
 
     for (const vertical of Object.keys(verticalSpecialistRotation)) {
       verticalSpecialistRotation[vertical].sort((a, b) => {
-        const crA = crew.find(cr => cr.id === a)!
-        const crB = crew.find(cr => cr.id === b)!
+        const crA = crewMap.get(a)!
+        const crB = crewMap.get(b)!
         return LEVEL_ORDER[crA.level] - LEVEL_ORDER[crB.level]
       })
     }
@@ -351,6 +346,14 @@ export function setupCrewEndpoints(app: Hono<{ Bindings: Bindings }>) {
     for (const u of unavailResult.results as any[]) {
       if (!unavailMap[u.unavailable_date]) unavailMap[u.unavailable_date] = new Set()
       unavailMap[u.unavailable_date].add(u.crew_id)
+    }
+
+    const eventGroupDates = new Map<string, string[]>()
+    for (const e of events) {
+      if (e.event_group) {
+        if (!eventGroupDates.has(e.event_group)) eventGroupDates.set(e.event_group, [])
+        eventGroupDates.get(e.event_group)!.push(e.event_date)
+      }
     }
 
     const dailyAssignments: Record<string, Set<number>> = {}
@@ -404,25 +407,26 @@ export function setupCrewEndpoints(app: Hono<{ Bindings: Bindings }>) {
         continue
       }
 
-      let eventDates: string[] = [event.event_date]
-      if (event.event_group) {
-        const groupEvents = events.filter(e => e.event_group === event.event_group)
-        eventDates = groupEvents.map(e => e.event_date)
-        if (multiDayAssignments[event.event_group]) {
-          const existing = multiDayAssignments[event.event_group]
-          eventAssignment.foh = existing.foh
-          eventAssignment.foh_name = crew.find(cr => cr.id === existing.foh)?.name
-          eventAssignment.stage = [...existing.stage]
-          eventAssignment.stage_names = existing.stage.map(id => crew.find(cr => cr.id === id)?.name).filter(Boolean)
-          if (existing.foh) {
-            await DB.prepare('INSERT INTO assignments (event_id, crew_id, role) VALUES (?, ?, ?)').bind(event.id, existing.foh, 'FOH').run()
-          }
-          for (const stageId of existing.stage) {
-            await DB.prepare('INSERT INTO assignments (event_id, crew_id, role) VALUES (?, ?, ?)').bind(event.id, stageId, 'Stage').run()
-          }
-          assignments.push(eventAssignment)
-          continue
+      const eventDates: string[] = event.event_group
+        ? (eventGroupDates.get(event.event_group) || [event.event_date])
+        : [event.event_date]
+
+      if (event.event_group && multiDayAssignments[event.event_group]) {
+        const existing = multiDayAssignments[event.event_group]
+        eventAssignment.foh = existing.foh
+        eventAssignment.foh_name = crewMap.get(existing.foh!)?.name
+        eventAssignment.stage = [...existing.stage]
+        eventAssignment.stage_names = existing.stage.map(id => crewMap.get(id)?.name).filter(Boolean)
+        const inserts: Promise<any>[] = []
+        if (existing.foh) {
+          inserts.push(DB.prepare('INSERT INTO assignments (event_id, crew_id, role) VALUES (?, ?, ?)').bind(event.id, existing.foh, 'FOH').run())
         }
+        for (const stageId of existing.stage) {
+          inserts.push(DB.prepare('INSERT INTO assignments (event_id, crew_id, role) VALUES (?, ?, ?)').bind(event.id, stageId, 'Stage').run())
+        }
+        await Promise.all(inserts)
+        assignments.push(eventAssignment)
+        continue
       }
 
       for (const date of eventDates) {
@@ -455,7 +459,7 @@ export function setupCrewEndpoints(app: Hono<{ Bindings: Bindings }>) {
       })
 
       if (matchingPref) {
-        const preferredCrew = crew.find(cr => cr.id === matchingPref.crewId)
+        const preferredCrew = crewMap.get(matchingPref.crewId)
         if (preferredCrew) {
           if (isAvailable(preferredCrew.id)) {
             selectedFOH = preferredCrew
@@ -474,7 +478,7 @@ export function setupCrewEndpoints(app: Hono<{ Bindings: Bindings }>) {
       if (!selectedFOH && !preferenceConflict) {
         const specialistIds = verticalSpecialistRotation[event.vertical] || []
         const availableSpecialists = specialistIds.filter(id => {
-          const cr = crew.find(c => c.id === id)!
+          const cr = crewMap.get(id)!
           if (!isAvailable(id)) return false
           const venueCapability = cr.venue_capabilities[event.venue_normalized]
           return venueCapability && venueCapability !== 'N'
@@ -484,7 +488,7 @@ export function setupCrewEndpoints(app: Hono<{ Bindings: Bindings }>) {
           const rotationIdx = verticalRotationIndex[event.vertical] || 0
           for (let i = 0; i < availableSpecialists.length; i++) {
             const idx = (rotationIdx + i) % availableSpecialists.length
-            selectedFOH = crew.find(cr => cr.id === availableSpecialists[idx])!
+            selectedFOH = crewMap.get(availableSpecialists[idx])!
             isSpecialistAssignment = true
             verticalRotationIndex[event.vertical] = (idx + 1) % availableSpecialists.length
             break
@@ -565,7 +569,7 @@ export function setupCrewEndpoints(app: Hono<{ Bindings: Bindings }>) {
         }
 
         for (const stageId of selectedStage) {
-          const stageCrew = stageCandidates.find(c => c.crew.id === stageId)?.crew
+          const stageCrew = crewMap.get(stageId)
           if (!stageCrew) continue
           for (const date of eventDates) dailyAssignments[date].add(stageCrew.id)
           currentMonthWorkload[stageCrew.id] = (currentMonthWorkload[stageCrew.id] || 0) + eventDates.length
@@ -591,12 +595,14 @@ export function setupCrewEndpoints(app: Hono<{ Bindings: Bindings }>) {
       assignments.push(eventAssignment)
     }
 
-    for (const [crewId, count] of Object.entries(currentMonthWorkload)) {
-      await DB.prepare(
-        `INSERT INTO workload_history (crew_id, month, assignment_count) VALUES (?, ?, ?)
-         ON CONFLICT(crew_id, month) DO UPDATE SET assignment_count = assignment_count + ?`
-      ).bind(parseInt(crewId), currentMonth, count, count).run()
-    }
+    await Promise.all(
+      Object.entries(currentMonthWorkload).map(([crewId, count]) =>
+        DB.prepare(
+          `INSERT INTO workload_history (crew_id, month, assignment_count) VALUES (?, ?, ?)
+           ON CONFLICT(crew_id, month) DO UPDATE SET assignment_count = assignment_count + ?`
+        ).bind(parseInt(crewId), currentMonth, count, count).run()
+      )
+    )
 
     return c.json({ assignments, conflicts })
   })
@@ -624,12 +630,14 @@ export function setupCrewEndpoints(app: Hono<{ Bindings: Bindings }>) {
     const eventId = c.req.param('eventId')
     const { foh_id, stage_ids } = await c.req.json()
     await DB.prepare('DELETE FROM assignments WHERE event_id = ?').bind(eventId).run()
+    const inserts: Promise<any>[] = []
     if (foh_id) {
-      await DB.prepare('INSERT INTO assignments (event_id, crew_id, role, was_manually_overridden) VALUES (?, ?, ?, 1)').bind(eventId, foh_id, 'FOH').run()
+      inserts.push(DB.prepare('INSERT INTO assignments (event_id, crew_id, role, was_manually_overridden) VALUES (?, ?, ?, 1)').bind(eventId, foh_id, 'FOH').run())
     }
     for (const stageId of stage_ids || []) {
-      await DB.prepare('INSERT INTO assignments (event_id, crew_id, role, was_manually_overridden) VALUES (?, ?, ?, 1)').bind(eventId, stageId, 'Stage').run()
+      inserts.push(DB.prepare('INSERT INTO assignments (event_id, crew_id, role, was_manually_overridden) VALUES (?, ?, ?, 1)').bind(eventId, stageId, 'Stage').run())
     }
+    await Promise.all(inserts)
     return c.json({ success: true })
   })
 
