@@ -30,4 +30,7 @@ setupQuoteEndpoints(app)
 setupParseWordEndpoints(app)
 setupSettingsEndpoints(app)
 
+// Serve static assets for all non-API routes (Pages _worker.js mode)
+app.get('*', (c) => c.env.ASSETS.fetch(c.req.raw))
+
 export default app

@@ -6,3 +6,4 @@ dist/
 .env
 .env.local
 .dev.vars
+public/_worker.js
