@@ -126,27 +126,27 @@ export function setupEventsEndpoints(app: Hono<{ Bindings: Bindings }>) {
           continue
         }
 
-        // UPSERT: update base fields but preserve rider + notes if already set
-        const result = await DB.prepare(
-          `INSERT INTO events (event_date, program, venue, team, sound_requirements, call_time)
-           VALUES (?, ?, ?, ?, ?, ?)
-           ON CONFLICT(event_date, program) DO UPDATE SET
-             venue              = excluded.venue,
-             team               = excluded.team,
-             sound_requirements = excluded.sound_requirements,
-             call_time          = excluded.call_time,
-             updated_at         = CURRENT_TIMESTAMP`
-        ).bind(
-          eventDate, program, venue,
-          row['team'] || '',
-          row['sound_requirements'] || row['sound requirements'] || '',
-          row['call_time'] || row['call time'] || ''
-        ).run()
+        const team = row['team'] || ''
+        const soundReq = row['sound_requirements'] || row['sound requirements'] || ''
+        const callTime = row['call_time'] || row['call time'] || ''
 
-        if ((result.meta.changes || 0) > 0) {
-          imported.push(`${eventDate} — ${program}`)
+        // Check for existing event; preserve rider + notes on re-import
+        const existing = await DB.prepare(
+          'SELECT id FROM events WHERE event_date = ? AND program = ? LIMIT 1'
+        ).bind(eventDate, program).first() as any
+
+        if (existing) {
+          await DB.prepare(
+            `UPDATE events SET venue=?, team=?, sound_requirements=?, call_time=?,
+             updated_at=CURRENT_TIMESTAMP WHERE id=?`
+          ).bind(venue, team, soundReq, callTime, existing.id).run()
+          skipped.push(`Row ${i + 1}: updated existing (${eventDate} ${program})`)
         } else {
-          skipped.push(`Row ${i + 1}: no change (${eventDate} ${program})`)
+          await DB.prepare(
+            `INSERT INTO events (event_date, program, venue, team, sound_requirements, call_time)
+             VALUES (?, ?, ?, ?, ?, ?)`
+          ).bind(eventDate, program, venue, team, soundReq, callTime).run()
+          imported.push(`${eventDate} — ${program}`)
         }
       } catch (err: any) {
         errors.push(`Row ${i + 1}: ${err.message}`)
