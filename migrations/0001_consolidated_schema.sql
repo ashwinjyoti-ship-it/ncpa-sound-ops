@@ -81,6 +81,13 @@ CREATE TABLE IF NOT EXISTS equipment (
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
+-- APP SETTINGS: Key-value store for runtime config (e.g. Anthropic API key)
+CREATE TABLE IF NOT EXISTS app_settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
 -- INDEXES
 CREATE INDEX IF NOT EXISTS idx_events_date ON events(event_date);
 CREATE INDEX IF NOT EXISTS idx_events_program ON events(program);

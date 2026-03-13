@@ -18,5 +18,8 @@
   ],
   "ai": {
     "binding": "AI"
+  },
+  "vars": {
+    "SHARED_PASSWORD": "ncpa2025"
   }
 }

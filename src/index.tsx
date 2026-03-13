@@ -5,6 +5,7 @@ import { setupCrewEndpoints } from './crew-endpoints'
 import { setupEventsEndpoints } from './events-endpoints'
 import { setupQuoteEndpoints } from './quote-endpoints'
 import { setupParseWordEndpoints } from './parse-word'
+import { setupSettingsEndpoints } from './settings-endpoints'
 import type { Bindings } from './types'
 
 const app = new Hono<{ Bindings: Bindings }>()
@@ -27,5 +28,6 @@ setupEventsEndpoints(app)
 setupCrewEndpoints(app)
 setupQuoteEndpoints(app)
 setupParseWordEndpoints(app)
+setupSettingsEndpoints(app)
 
 export default app
