@@ -21,6 +21,8 @@ CREATE TABLE IF NOT EXISTS events (
   event_group TEXT,                  -- for multi-day events
   needs_manual_review BOOLEAN DEFAULT 0,
   manual_flag_reason TEXT,
+  rider TEXT,                        -- technical rider (set manually; not touched by CSV import)
+  notes TEXT,                        -- internal notes (set manually; not touched by CSV import)
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
@@ -89,6 +91,7 @@ CREATE TABLE IF NOT EXISTS app_settings (
 );
 
 -- INDEXES
+CREATE UNIQUE INDEX IF NOT EXISTS idx_events_date_program ON events(event_date, program);
 CREATE INDEX IF NOT EXISTS idx_events_date ON events(event_date);
 CREATE INDEX IF NOT EXISTS idx_events_program ON events(program);
 CREATE INDEX IF NOT EXISTS idx_events_venue ON events(venue);

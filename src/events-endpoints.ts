@@ -48,7 +48,7 @@ export function setupEventsEndpoints(app: Hono<{ Bindings: Bindings }>) {
 
     const allowed = ['sound_requirements', 'call_time', 'venue', 'team', 'program',
                      'event_date', 'stage_crew_needed', 'needs_manual_review',
-                     'manual_flag_reason', 'requirements_updated']
+                     'manual_flag_reason', 'requirements_updated', 'rider', 'notes']
     const fields: string[] = []
     const values: any[] = []
 
@@ -126,9 +126,16 @@ export function setupEventsEndpoints(app: Hono<{ Bindings: Bindings }>) {
           continue
         }
 
+        // UPSERT: update base fields but preserve rider + notes if already set
         const result = await DB.prepare(
-          `INSERT OR IGNORE INTO events (event_date, program, venue, team, sound_requirements, call_time)
-           VALUES (?, ?, ?, ?, ?, ?)`
+          `INSERT INTO events (event_date, program, venue, team, sound_requirements, call_time)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(event_date, program) DO UPDATE SET
+             venue              = excluded.venue,
+             team               = excluded.team,
+             sound_requirements = excluded.sound_requirements,
+             call_time          = excluded.call_time,
+             updated_at         = CURRENT_TIMESTAMP`
         ).bind(
           eventDate, program, venue,
           row['team'] || '',
@@ -139,7 +146,7 @@ export function setupEventsEndpoints(app: Hono<{ Bindings: Bindings }>) {
         if ((result.meta.changes || 0) > 0) {
           imported.push(`${eventDate} — ${program}`)
         } else {
-          skipped.push(`Row ${i + 1}: duplicate skipped (${eventDate} ${program})`)
+          skipped.push(`Row ${i + 1}: no change (${eventDate} ${program})`)
         }
       } catch (err: any) {
         errors.push(`Row ${i + 1}: ${err.message}`)
@@ -179,10 +186,11 @@ export function setupEventsEndpoints(app: Hono<{ Bindings: Bindings }>) {
       return s
     }
 
-    let csv = 'Date,Program,Venue,Team,Sound Requirements,Call Time\n'
+    let csv = 'Date,Program,Venue,Team,Sound Requirements,Call Time,Rider,Notes\n'
     for (const e of results.results as any[]) {
       csv += [e.event_date, esc(e.program), esc(e.venue), esc(e.team),
-              esc(e.sound_requirements), esc(e.call_time)].join(',') + '\n'
+              esc(e.sound_requirements), esc(e.call_time),
+              esc(e.rider), esc(e.notes)].join(',') + '\n'
     }
 
     return new Response(csv, {

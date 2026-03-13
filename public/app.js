@@ -199,6 +199,8 @@ function openEventModal(id) {
   $('modal-meta').textContent    = `${ev.event_date} · ${ev.venue || ''}${ev.team ? ' · ' + ev.team : ''}`
   $('edit-sound').value          = ev.sound_requirements || ''
   $('edit-calltime').value       = ev.call_time || ''
+  $('edit-rider').value          = ev.rider || ''
+  $('edit-notes').value          = ev.notes || ''
   $('modal-status').textContent  = ''
   $('modal-status').className    = 'save-status'
 
@@ -216,6 +218,8 @@ async function saveEvent() {
   if (!id) return
   const sound = $('edit-sound').value.trim()
   const call  = $('edit-calltime').value.trim()
+  const rider = $('edit-rider').value.trim() || null
+  const notes = $('edit-notes').value.trim() || null
   const st    = $('modal-status')
 
   st.textContent = 'Saving…'
@@ -223,13 +227,15 @@ async function saveEvent() {
 
   const result = await PUT(`/api/events/${id}`, {
     sound_requirements: sound,
-    call_time: call
+    call_time: call,
+    rider,
+    notes
   })
 
   if (result?.success) {
     // Update local state
     const ev = state.events.find(e => String(e.id) === String(id))
-    if (ev) { ev.sound_requirements = sound; ev.call_time = call }
+    if (ev) { ev.sound_requirements = sound; ev.call_time = call; ev.rider = rider; ev.notes = notes }
     renderCalendar()
     st.textContent = '✓ Saved'
     st.className   = 'save-status save-status--ok'
