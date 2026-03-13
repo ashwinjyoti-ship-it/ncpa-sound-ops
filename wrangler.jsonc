@@ -1,7 +1,7 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "ncpa-sound-ops",
-  "compatibility_date": "2026-01-27",
+  "compatibility_date": "2025-10-24",
   "pages_build_output_dir": "./dist",
   "compatibility_flags": [
     "nodejs_compat"
@@ -9,17 +9,11 @@
   "d1_databases": [
     {
       "binding": "DB",
-      "database_name": "ncpa-sound-crew-db",
-      "database_id": "8dd5bac9-26b7-45d7-94b3-7a013ec3e880"
+      "database_name": "ncpa-ops-db",
+      "database_id": "e7f61ecc-994f-4a7e-84e3-21887a81e5d7"
     }
   ],
   "ai": {
     "binding": "AI"
-  },
-  "vectorize": [
-    {
-      "binding": "VECTORIZE",
-      "index_name": "ncpa-events-index"
-    }
-  ]
+  }
 }

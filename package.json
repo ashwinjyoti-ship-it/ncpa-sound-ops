@@ -1,18 +1,18 @@
 {
   "name": "ncpa-sound-ops",
   "type": "module",
+  "version": "1.0.0",
   "scripts": {
     "dev": "vite",
-    "dev:sandbox": "wrangler pages dev dist --d1=ncpa-sound-crew-db --local --ip 0.0.0.0 --port 3000",
+    "dev:sandbox": "wrangler pages dev dist --d1=ncpa-ops-db --local --ip 0.0.0.0 --port 3000",
     "build": "vite build",
     "preview": "wrangler pages dev",
-    "deploy": "npm run build && wrangler pages deploy",
-    "deploy:prod": "npm run build && wrangler pages deploy dist --project-name ncpa-sound-ops",
-    "cf-typegen": "wrangler types --env-interface CloudflareBindings",
-    "db:migrate:local": "wrangler d1 migrations apply ncpa-sound-crew-db --local",
-    "db:migrate:prod": "wrangler d1 migrations apply ncpa-sound-crew-db",
-    "db:seed": "wrangler d1 execute ncpa-sound-crew-db --local --file=./seed.sql",
-    "db:reset": "rm -rf .wrangler/state/v3/d1 && npm run db:migrate:local && npm run db:seed"
+    "deploy": "npm run build && wrangler pages deploy dist --project-name ncpa-sound-ops",
+    "db:migrate:local": "wrangler d1 migrations apply ncpa-ops-db --local",
+    "db:migrate:prod": "wrangler d1 migrations apply ncpa-ops-db",
+    "db:seed": "wrangler d1 execute ncpa-ops-db --local --file=./seed.sql",
+    "db:reset": "rm -rf .wrangler/state/v3/d1 && npm run db:migrate:local && npm run db:seed",
+    "cf-typegen": "wrangler types --env-interface CloudflareBindings"
   },
   "dependencies": {
     "hono": "^4.10.2"
@@ -20,9 +20,7 @@
   "devDependencies": {
     "@hono/vite-build": "^1.2.0",
     "@hono/vite-dev-server": "^0.18.2",
-    "tailwindcss": "^3.4.0",
-    "autoprefixer": "^10.4.16",
-    "postcss": "^8.4.32",
+    "typescript": "^5.3.0",
     "vite": "^6.3.5",
     "wrangler": "^4.4.0"
   }
