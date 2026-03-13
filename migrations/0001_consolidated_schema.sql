@@ -1,50 +1,28 @@
 -- ============================================
 -- NCPA Workflow Suite - Unified D1 Schema
--- Consolidates: ncpa-sound-manager + crew-assignment-automation + quote-builder
+-- Events + Crew + Equipment (no user accounts - shared password auth)
 -- ============================================
 
--- AUTH: Users table
-CREATE TABLE IF NOT EXISTS users (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  email TEXT UNIQUE NOT NULL,
-  password_hash TEXT NOT NULL,
-  role TEXT DEFAULT 'user',
-  status TEXT DEFAULT 'pending',
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  approved_at DATETIME,
-  approved_by TEXT
-);
-
--- AUTH: Sessions table
-CREATE TABLE IF NOT EXISTS sessions (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  user_id INTEGER NOT NULL,
-  token TEXT UNIQUE NOT NULL,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  expires_at DATETIME NOT NULL,
-  FOREIGN KEY (user_id) REFERENCES users(id)
-);
-
--- EVENTS: Core events table (unified from ncpa-sound-manager + crew-assignment-automation)
+-- EVENTS: Core events table
 CREATE TABLE IF NOT EXISTS events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  -- Core fields from ncpa-sound-manager
   event_date TEXT NOT NULL,          -- YYYY-MM-DD
   program TEXT NOT NULL,             -- event name/program
   venue TEXT NOT NULL,               -- original venue text
   team TEXT,                         -- curator/team
   sound_requirements TEXT,
   call_time TEXT,
-  crew TEXT,                         -- legacy text field
   requirements_updated BOOLEAN DEFAULT 0,
-  -- Fields from crew-assignment-automation
+  -- Crew assignment fields
   venue_normalized TEXT,             -- mapped venue for rules engine
   vertical TEXT,                     -- derived from team
-  batch_id TEXT,                     -- groups uploads together
+  batch_id TEXT,                     -- groups crew assignment uploads
   stage_crew_needed INTEGER DEFAULT 1,
   event_group TEXT,                  -- for multi-day events
   needs_manual_review BOOLEAN DEFAULT 0,
   manual_flag_reason TEXT,
+  rider TEXT,                        -- technical rider (set manually; not touched by CSV import)
+  notes TEXT,                        -- internal notes (set manually; not touched by CSV import)
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
@@ -96,39 +74,7 @@ CREATE TABLE IF NOT EXISTS workload_history (
   UNIQUE(crew_id, month)
 );
 
--- QUOTES: Quote headers
-CREATE TABLE IF NOT EXISTS quotes (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  quote_number TEXT UNIQUE NOT NULL,
-  client_name TEXT NOT NULL,
-  event_name TEXT,
-  event_date TEXT,
-  venue TEXT,
-  quote_date TEXT DEFAULT (date('now')),
-  subtotal REAL NOT NULL DEFAULT 0,
-  gst_rate REAL NOT NULL DEFAULT 18,
-  gst_amount REAL NOT NULL DEFAULT 0,
-  total REAL NOT NULL DEFAULT 0,
-  notes TEXT,
-  status TEXT DEFAULT 'draft',       -- draft | sent | approved | rejected
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-);
-
--- QUOTES: Line items
-CREATE TABLE IF NOT EXISTS quote_line_items (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  quote_id INTEGER NOT NULL,
-  description TEXT NOT NULL,
-  quantity REAL NOT NULL DEFAULT 1,
-  unit_price REAL NOT NULL DEFAULT 0,
-  total REAL NOT NULL DEFAULT 0,
-  sort_order INTEGER DEFAULT 0,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  FOREIGN KEY (quote_id) REFERENCES quotes(id) ON DELETE CASCADE
-);
-
--- QUOTES: Equipment catalog (from quote-builder)
+-- QUOTES: Equipment catalog (rates only - quotes are not saved)
 CREATE TABLE IF NOT EXISTS equipment (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,
@@ -137,11 +83,18 @@ CREATE TABLE IF NOT EXISTS equipment (
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
+-- APP SETTINGS: Key-value store for runtime config (e.g. Anthropic API key)
+CREATE TABLE IF NOT EXISTS app_settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
 -- INDEXES
+CREATE UNIQUE INDEX IF NOT EXISTS idx_events_date_program ON events(event_date, program);
 CREATE INDEX IF NOT EXISTS idx_events_date ON events(event_date);
 CREATE INDEX IF NOT EXISTS idx_events_program ON events(program);
 CREATE INDEX IF NOT EXISTS idx_events_venue ON events(venue);
-CREATE INDEX IF NOT EXISTS idx_events_crew ON events(crew);
 CREATE INDEX IF NOT EXISTS idx_events_team ON events(team);
 CREATE INDEX IF NOT EXISTS idx_events_batch ON events(batch_id);
 CREATE INDEX IF NOT EXISTS idx_events_group ON events(event_group);
@@ -150,6 +103,3 @@ CREATE INDEX IF NOT EXISTS idx_assignments_crew ON assignments(crew_id);
 CREATE INDEX IF NOT EXISTS idx_unavailability_date ON crew_unavailability(unavailable_date);
 CREATE INDEX IF NOT EXISTS idx_unavailability_crew ON crew_unavailability(crew_id);
 CREATE INDEX IF NOT EXISTS idx_workload_month ON workload_history(month);
-CREATE INDEX IF NOT EXISTS idx_quotes_status ON quotes(status);
-CREATE INDEX IF NOT EXISTS idx_quote_items_quote ON quote_line_items(quote_id);
-CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token);

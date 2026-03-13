@@ -4,14 +4,15 @@
   "version": "1.0.0",
   "scripts": {
     "dev": "vite",
-    "dev:sandbox": "wrangler pages dev dist --d1=ncpa-ops-db --local --ip 0.0.0.0 --port 3000",
+    "dev:worker": "wrangler dev",
     "build": "vite build",
-    "preview": "wrangler pages dev",
-    "deploy": "npm run build && wrangler pages deploy dist --project-name ncpa-sound-ops",
+    "deploy": "npm run build && wrangler deploy",
     "db:migrate:local": "wrangler d1 migrations apply ncpa-ops-db --local",
     "db:migrate:prod": "wrangler d1 migrations apply ncpa-ops-db",
-    "db:seed": "wrangler d1 execute ncpa-ops-db --local --file=./seed.sql",
-    "db:reset": "rm -rf .wrangler/state/v3/d1 && npm run db:migrate:local && npm run db:seed",
+    "db:cleanup:prod": "wrangler d1 execute ncpa-ops-db --file=./migrations/0002_remove_unused_tables.sql",
+    "db:seed:local": "wrangler d1 execute ncpa-ops-db --local --file=./seed.sql",
+    "db:seed:prod": "wrangler d1 execute ncpa-ops-db --file=./seed.sql",
+    "db:reset:local": "rm -rf .wrangler/state/v3/d1 && npm run db:migrate:local && npm run db:seed:local",
     "cf-typegen": "wrangler types --env-interface CloudflareBindings"
   },
   "dependencies": {

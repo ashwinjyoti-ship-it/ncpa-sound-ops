@@ -1,9 +1,5 @@
 import { Hono } from 'hono'
-
-type Bindings = {
-  DB: D1Database
-  ANTHROPIC_API_KEY: string
-}
+import type { Bindings } from './types'
 
 // Helper: Parse a chunk of document text with Claude Sonnet 4
 // EXACT implementation from ncpa-sound-manager
@@ -148,9 +144,16 @@ export function setupParseWordEndpoints(app: Hono<{ Bindings: Bindings }>) {
         return c.json({ success: false, error: 'Document text is required' }, 400)
       }
 
-      const apiKey = c.env.ANTHROPIC_API_KEY
+      // Read API key from D1 settings first, fall back to env var
+      const keyRow = await c.env.DB.prepare(
+        "SELECT value FROM app_settings WHERE key = 'anthropic_api_key'"
+      ).first() as any
+      const apiKey = keyRow?.value || c.env.ANTHROPIC_API_KEY || ''
       if (!apiKey) {
-        return c.json({ success: false, error: 'AI service not configured' }, 500)
+        return c.json({
+          success: false,
+          error: 'Anthropic API key not configured. Add it in Settings → AI Key.'
+        }, 500)
       }
 
       let contextHint = ''

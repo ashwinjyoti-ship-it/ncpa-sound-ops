@@ -1,0 +1,461 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NCPA Sound Ops</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<!-- LOGIN -->
+<div id="login-screen" class="login-screen hidden">
+  <div class="login-card">
+    <div class="login-logo">
+      <div class="login-logo-mark">&#9670;</div>
+      <span class="logo-text">NCPA</span>
+      <span class="logo-sub">Sound Operations</span>
+    </div>
+    <form id="login-form" autocomplete="off">
+      <div class="field">
+        <input type="password" id="password-input" placeholder="Enter password" autocomplete="current-password">
+      </div>
+      <div id="login-error" class="error-msg hidden"></div>
+      <button type="submit" class="btn btn-primary btn-block">Enter</button>
+    </form>
+  </div>
+</div>
+
+<!-- MAIN APP -->
+<div id="app" class="hidden">
+
+  <nav class="top-nav">
+    <div class="nav-brand">NCPA <span>Sound Ops</span></div>
+    <div class="nav-tabs">
+      <button class="nav-tab active" data-tab="events">Events</button>
+      <button class="nav-tab" data-tab="crew">Crew Assignment</button>
+      <button class="nav-tab" data-tab="quotes">Quote Builder</button>
+    </div>
+    <div class="nav-actions">
+      <button id="settings-btn" class="btn btn-ghost btn-icon" title="Settings">&#9881;</button>
+      <button id="logout-btn" class="btn btn-ghost btn-sm">Logout</button>
+    </div>
+  </nav>
+
+  <main class="main-content">
+
+    <!-- EVENTS TAB -->
+    <div id="tab-events" class="tab-panel active">
+      <div class="tab-bar">
+        <div class="month-nav">
+          <button id="prev-month" class="btn btn-ghost btn-icon">&#8249;</button>
+          <h2 id="month-label">Loading…</h2>
+          <button id="next-month" class="btn btn-ghost btn-icon">&#8250;</button>
+        </div>
+        <div class="tab-bar-actions">
+          <button id="import-open-btn" class="btn btn-ghost btn-sm">&#8593; Import CSV</button>
+          <button id="export-csv-btn" class="btn btn-ghost btn-sm">&#8595; CSV</button>
+          <button id="export-ical-btn" class="btn btn-ghost btn-sm">&#8595; Calendar</button>
+        </div>
+      </div>
+      <div class="cal-legend">
+        <span class="legend-item legend-item--complete">&#9679; Sound + Call time filled</span>
+        <span class="legend-item legend-item--pending">&#9679; Needs attention</span>
+      </div>
+      <div class="calendar-wrap">
+        <div class="cal-day-names">
+          <div>Mon</div><div>Tue</div><div>Wed</div>
+          <div>Thu</div><div>Fri</div><div>Sat</div><div>Sun</div>
+        </div>
+        <div id="calendar-grid" class="calendar-grid">
+          <div class="cal-loading">Loading events…</div>
+        </div>
+      </div>
+      <!-- Table view hidden in UI — data available in code -->
+      <table id="events-table" style="display:none" aria-hidden="true">
+        <thead><tr><th>Date</th><th>Program</th><th>Venue</th><th>Team</th><th>Sound Requirements</th><th>Call Time</th></tr></thead>
+        <tbody id="events-table-body"></tbody>
+      </table>
+    </div>
+
+    <!-- CREW TAB -->
+    <div id="tab-crew" class="tab-panel hidden">
+
+      <!-- Sub-nav -->
+      <div class="crew-sub-nav">
+        <button class="crew-sub-tab active" data-sub="assignments">Assignments</button>
+        <button class="crew-sub-tab" data-sub="availability">Availability</button>
+        <button class="crew-sub-tab" data-sub="workload">Workload</button>
+      </div>
+
+      <!-- ASSIGNMENTS sub-panel -->
+      <div id="crew-assignments" class="crew-sub-panel">
+        <div class="crew-split">
+
+          <!-- Batch sidebar -->
+          <div class="batch-sidebar">
+            <div class="sidebar-header">
+              <span>Batches</span>
+              <button id="new-batch-btn" class="btn btn-ghost btn-sm">&#43; Upload</button>
+            </div>
+            <div id="batch-list" class="batch-list">
+              <div class="batch-empty">No batches yet.<br>Upload events to start.</div>
+            </div>
+          </div>
+
+          <!-- Assignment main area -->
+          <div class="assignment-main">
+            <div id="assignment-empty" class="assignment-empty">
+              <div class="assignment-empty-icon">&#9638;</div>
+              <div>Select a batch from the sidebar<br><span>or upload events to create a new one</span></div>
+            </div>
+            <div id="assignment-content" class="hidden">
+              <div class="assignment-toolbar">
+                <div id="batch-info" class="batch-info"></div>
+                <div class="assignment-actions">
+                  <button id="run-engine-btn" class="btn btn-primary btn-sm">&#9654; Run Engine</button>
+                  <button id="export-crew-csv-btn" class="btn btn-ghost btn-sm">&#8595; Export CSV</button>
+                </div>
+              </div>
+              <div id="assignment-conflicts" class="conflicts-banner hidden"></div>
+              <div class="assignment-table-wrap">
+                <table class="assignment-table">
+                  <thead>
+                    <tr>
+                      <th>Date</th><th>Program</th><th>Venue</th><th>Vertical</th>
+                      <th>FOH</th><th>Stage</th><th class="col-flag"></th>
+                    </tr>
+                  </thead>
+                  <tbody id="assignment-tbody"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- AVAILABILITY sub-panel -->
+      <div id="crew-availability" class="crew-sub-panel hidden">
+        <div class="avail-controls">
+          <div class="month-nav">
+            <button id="avail-prev-month" class="btn btn-ghost btn-icon">&#8249;</button>
+            <h3 id="avail-month-label">March 2025</h3>
+            <button id="avail-next-month" class="btn btn-ghost btn-icon">&#8250;</button>
+          </div>
+          <div class="avail-legend">
+            <span class="avail-legend-item avail-legend-off">&#9632; Unavailable</span>
+            <span class="avail-legend-item">Click cell to toggle</span>
+          </div>
+        </div>
+        <div class="avail-table-wrap">
+          <div id="avail-grid" class="avail-grid">
+            <div class="avail-loading">Loading&#8230;</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- WORKLOAD sub-panel -->
+      <div id="crew-workload" class="crew-sub-panel hidden">
+        <div class="workload-controls">
+          <div class="month-nav">
+            <button id="wl-prev-month" class="btn btn-ghost btn-icon">&#8249;</button>
+            <h3 id="wl-month-label">March 2025</h3>
+            <button id="wl-next-month" class="btn btn-ghost btn-icon">&#8250;</button>
+          </div>
+        </div>
+        <div class="workload-table-wrap">
+          <table class="workload-table">
+            <thead><tr><th>Name</th><th>Level</th><th>This Month</th></tr></thead>
+            <tbody id="workload-tbody"><tr><td colspan="3" class="loading-cell">Loading&#8230;</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- QUOTES TAB -->
+    <div id="tab-quotes" class="tab-panel hidden">
+      <div class="quote-split">
+
+        <!-- LEFT: Equipment Catalog -->
+        <div class="catalog-panel">
+          <div class="catalog-panel-hd">
+            <h3>Equipment Catalog</h3>
+            <button id="eq-add-btn" class="btn btn-primary btn-sm">+ Add Item</button>
+          </div>
+          <div class="catalog-filters">
+            <select id="eq-category-filter" class="select-input select-sm">
+              <option value="">All categories</option>
+            </select>
+            <input id="eq-search" type="text" class="text-input input-sm" placeholder="Search…">
+          </div>
+          <div class="catalog-table-wrap">
+            <table class="catalog-table">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Category</th>
+                  <th class="col-rate">Rate (&#8377;)</th>
+                  <th class="col-actions"></th>
+                </tr>
+              </thead>
+              <tbody id="catalog-tbody">
+                <tr><td colspan="4" class="loading-cell">Loading…</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- RIGHT: Live Quote Builder -->
+        <div class="quote-panel">
+          <div class="quote-panel-hd">
+            <h3>Quote</h3>
+            <input id="quote-client" type="text" class="text-input input-sm" placeholder="Client / Event name" style="max-width:220px">
+          </div>
+          <div class="quote-lines-wrap">
+            <table class="quote-lines-table" id="quote-lines-table">
+              <thead>
+                <tr>
+                  <th>Item</th>
+                  <th class="col-days">Days</th>
+                  <th class="col-qty">Qty</th>
+                  <th class="col-rate">Rate</th>
+                  <th class="col-amount">Amount</th>
+                  <th class="col-del"></th>
+                </tr>
+              </thead>
+              <tbody id="quote-lines-tbody"></tbody>
+            </table>
+            <div id="quote-empty" class="quote-empty">
+              <span>Click <strong>+ Quote</strong> next to any catalog item to start</span>
+            </div>
+          </div>
+          <div class="quote-totals">
+            <div class="totals-row">
+              <span>Subtotal</span>
+              <span id="qt-subtotal">&#8377;0</span>
+            </div>
+            <div class="totals-row">
+              <label class="gst-label">
+                <input type="checkbox" id="gst-toggle" checked>
+                <span>GST 18%</span>
+              </label>
+              <span id="qt-gst">&#8377;0</span>
+            </div>
+            <div class="totals-row totals-grand">
+              <span>Grand Total</span>
+              <span id="qt-total">&#8377;0</span>
+            </div>
+          </div>
+          <div class="quote-footer-actions">
+            <button id="quote-clear-btn" class="btn btn-ghost btn-sm">Clear</button>
+            <button id="quote-print-btn" class="btn btn-primary btn-sm">&#8595; Export / Print</button>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+  </main>
+</div>
+
+<!-- EVENT EDIT MODAL -->
+<div id="event-modal" class="modal hidden">
+  <div class="modal-backdrop" id="event-modal-backdrop"></div>
+  <div class="modal-card">
+    <div class="modal-header">
+      <div class="modal-header-info">
+        <div id="modal-program" class="modal-title"></div>
+        <div id="modal-meta" class="modal-meta"></div>
+      </div>
+      <button class="btn btn-ghost btn-icon" id="event-modal-close">&#10005;</button>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label for="edit-sound">Sound Requirements</label>
+        <textarea id="edit-sound" rows="5" placeholder="e.g. 2 cordless mics, playback laptop, NCPA basic sound, sound check 6pm"></textarea>
+      </div>
+      <div class="field">
+        <label for="edit-calltime">Call Time</label>
+        <input type="text" id="edit-calltime" placeholder="e.g. 2:00pm">
+        <span class="field-hint">Time when sound must be ready</span>
+      </div>
+      <div class="field">
+        <label for="edit-rider">Rider</label>
+        <textarea id="edit-rider" rows="2" placeholder="Technical rider details…"></textarea>
+      </div>
+      <div class="field">
+        <label for="edit-notes">Notes</label>
+        <textarea id="edit-notes" rows="3" placeholder="Internal notes…"></textarea>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <div id="modal-status" class="save-status"></div>
+      <button class="btn btn-primary" id="modal-save-btn">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- CSV IMPORT MODAL -->
+<div id="import-modal" class="modal hidden">
+  <div class="modal-backdrop" id="import-modal-backdrop"></div>
+  <div class="modal-card modal-card--wide">
+    <div class="modal-header">
+      <div class="modal-header-info">
+        <div class="modal-title">Import Events from CSV</div>
+        <div class="modal-meta">Paste export from old app — imports one month at a time</div>
+      </div>
+      <button class="btn btn-ghost btn-icon" id="import-modal-close">&#10005;</button>
+    </div>
+    <div class="modal-body">
+      <div class="import-hint">
+        <strong>Expected columns:</strong> Date, Program, Venue, Team, Sound Requirements, Call Time<br>
+        <strong>Date formats:</strong> YYYY-MM-DD &nbsp;&#183;&nbsp; DD-MM-YYYY &nbsp;&#183;&nbsp; DD/MM/YYYY
+      </div>
+      <div class="field">
+        <label for="import-csv-input">CSV Content</label>
+        <textarea id="import-csv-input" rows="14" class="mono" placeholder="Date,Program,Venue,Team,Sound Requirements,Call Time&#10;12-03-2025,Concert Name,Tata Theatre,Dr.Rao/Team,2 cordless mics,2:00pm"></textarea>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <div id="import-result" class="import-result hidden"></div>
+      <button class="btn btn-primary" id="import-run-btn">Import</button>
+    </div>
+  </div>
+</div>
+
+<!-- SETTINGS MODAL -->
+<div id="settings-modal" class="modal hidden">
+  <div class="modal-backdrop" id="settings-modal-backdrop"></div>
+  <div class="modal-card modal-card--sm">
+    <div class="modal-header">
+      <div class="modal-header-info">
+        <div class="modal-title">Settings</div>
+        <div class="modal-meta">App configuration</div>
+      </div>
+      <button class="btn btn-ghost btn-icon" id="settings-modal-close">&#10005;</button>
+    </div>
+    <div class="modal-body">
+      <div class="settings-section">
+        <div class="settings-section-title">AI Document Parsing</div>
+        <div class="settings-section-desc">Required for parsing Word event schedules into the app.</div>
+        <div class="key-status-row">
+          <span id="ai-key-status-badge" class="key-status-badge">Checking…</span>
+        </div>
+        <div class="field">
+          <label for="ai-key-input">Anthropic API Key</label>
+          <input type="password" id="ai-key-input" placeholder="sk-ant-api03-…" autocomplete="off">
+          <span class="field-hint">Get from console.anthropic.com &#183; Stored securely in database</span>
+        </div>
+        <div class="field-row">
+          <button class="btn btn-primary btn-sm" id="ai-key-save-btn">Save Key</button>
+          <button class="btn btn-ghost btn-sm" id="ai-key-clear-btn" style="display:none">Clear</button>
+        </div>
+        <div id="ai-key-msg" class="save-status" style="display:none"></div>
+      </div>
+      <div class="settings-section settings-section--info">
+        <div class="settings-section-title">Access Password</div>
+        <div class="settings-section-desc">
+          Edit <code>wrangler.jsonc</code> → <code>vars.SHARED_PASSWORD</code> then push to change.
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+<!-- UPLOAD BATCH MODAL -->
+<div id="upload-modal" class="modal hidden">
+  <div class="modal-backdrop" id="upload-modal-backdrop"></div>
+  <div class="modal-card modal-card--wide">
+    <div class="modal-header">
+      <div class="modal-header-info">
+        <div class="modal-title">Upload Events for Assignment</div>
+        <div class="modal-meta">Paste the month&#39;s event list &#8212; one batch per month</div>
+      </div>
+      <button class="btn btn-ghost btn-icon" id="upload-modal-close">&#10005;</button>
+    </div>
+    <div class="modal-body">
+      <div class="import-hint">
+        <strong>Columns:</strong> Date, Program, Venue, Team, Sound Requirements, Call Time<br>
+        <strong>Date formats:</strong> YYYY-MM-DD &#183; DD-MM-YYYY &#183; DD/MM/YYYY
+      </div>
+      <div class="field">
+        <label for="upload-csv-input">CSV Content</label>
+        <textarea id="upload-csv-input" rows="14" class="mono"
+          placeholder="Date,Program,Venue,Team,Sound Requirements,Call Time&#10;15-03-2025,Spring Concert,Tata Theatre,Dr.Rao/Team,,&#10;..."></textarea>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <div id="upload-result" class="import-result hidden"></div>
+      <button class="btn btn-primary" id="upload-run-btn">Upload Batch</button>
+    </div>
+  </div>
+</div>
+
+<!-- ASSIGNMENT OVERRIDE MODAL -->
+<div id="override-modal" class="modal hidden">
+  <div class="modal-backdrop" id="override-modal-backdrop"></div>
+  <div class="modal-card">
+    <div class="modal-header">
+      <div class="modal-header-info">
+        <div id="override-event-name" class="modal-title"></div>
+        <div id="override-event-meta" class="modal-meta"></div>
+      </div>
+      <button class="btn btn-ghost btn-icon" id="override-modal-close">&#10005;</button>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label for="override-foh-select">FOH</label>
+        <select id="override-foh-select" class="select-input">
+          <option value="">&#8212; Unassigned &#8212;</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Stage Crew</label>
+        <div id="override-stage-list" class="stage-checklist"></div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <div id="override-status" class="save-status"></div>
+      <button class="btn btn-primary" id="override-save-btn">Save Override</button>
+    </div>
+  </div>
+</div>
+
+<!-- EQUIPMENT MODAL -->
+<div id="eq-modal" class="modal hidden">
+  <div class="modal-backdrop" id="eq-modal-backdrop"></div>
+  <div class="modal-card modal-card--sm">
+    <div class="modal-header">
+      <div id="eq-modal-title" class="modal-title">Add Equipment</div>
+      <button class="btn btn-ghost btn-icon" id="eq-modal-close">&#10005;</button>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label for="eq-name-input">Name</label>
+        <input id="eq-name-input" type="text" class="text-input" placeholder="e.g. Line Array Speaker">
+      </div>
+      <div class="field">
+        <label for="eq-category-input">Category</label>
+        <input id="eq-category-input" type="text" class="text-input" placeholder="e.g. Speakers, Microphones…">
+      </div>
+      <div class="field">
+        <label for="eq-rate-input">Rate per item (&#8377;)</label>
+        <input id="eq-rate-input" type="number" class="text-input" placeholder="0" min="0" step="1">
+      </div>
+    </div>
+    <div class="modal-footer">
+      <div id="eq-modal-status" class="save-status"></div>
+      <button id="eq-modal-save" class="btn btn-primary">Save</button>
+    </div>
+  </div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>

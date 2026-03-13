@@ -1,11 +1,14 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "ncpa-sound-ops",
+  "main": "dist/index.js",
   "compatibility_date": "2025-10-24",
-  "pages_build_output_dir": "./dist",
   "compatibility_flags": [
     "nodejs_compat"
   ],
+  "assets": {
+    "directory": "./public"
+  },
   "d1_databases": [
     {
       "binding": "DB",
@@ -15,5 +18,8 @@
   ],
   "ai": {
     "binding": "AI"
+  },
+  "vars": {
+    "SHARED_PASSWORD": "ncpa2025"
   }
 }
