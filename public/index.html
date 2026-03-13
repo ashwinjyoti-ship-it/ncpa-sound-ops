@@ -83,17 +83,98 @@
 
     <!-- CREW TAB -->
     <div id="tab-crew" class="tab-panel hidden">
-      <div class="panel-header">
-        <h2>Crew Assignment</h2>
-        <p class="panel-sub">Upload events · Run assignment engine · Review &amp; override</p>
+
+      <!-- Sub-nav -->
+      <div class="crew-sub-nav">
+        <button class="crew-sub-tab active" data-sub="assignments">Assignments</button>
+        <button class="crew-sub-tab" data-sub="availability">Availability</button>
+        <button class="crew-sub-tab" data-sub="workload">Workload</button>
       </div>
-      <div class="placeholder-notice">
-        <div class="notice-icon">&#127925;</div>
-        <div class="notice-text">
-          <strong>Phase 2 — Next</strong>
-          <span>Upload your month's events, run the crew assignment engine, review FOH/Stage assignments, override where needed. Export crew CSV.</span>
+
+      <!-- ASSIGNMENTS sub-panel -->
+      <div id="crew-assignments" class="crew-sub-panel">
+        <div class="crew-split">
+
+          <!-- Batch sidebar -->
+          <div class="batch-sidebar">
+            <div class="sidebar-header">
+              <span>Batches</span>
+              <button id="new-batch-btn" class="btn btn-ghost btn-sm">&#43; Upload</button>
+            </div>
+            <div id="batch-list" class="batch-list">
+              <div class="batch-empty">No batches yet.<br>Upload events to start.</div>
+            </div>
+          </div>
+
+          <!-- Assignment main area -->
+          <div class="assignment-main">
+            <div id="assignment-empty" class="assignment-empty">
+              <div class="assignment-empty-icon">&#9638;</div>
+              <div>Select a batch from the sidebar<br><span>or upload events to create a new one</span></div>
+            </div>
+            <div id="assignment-content" class="hidden">
+              <div class="assignment-toolbar">
+                <div id="batch-info" class="batch-info"></div>
+                <div class="assignment-actions">
+                  <button id="run-engine-btn" class="btn btn-primary btn-sm">&#9654; Run Engine</button>
+                  <button id="export-crew-csv-btn" class="btn btn-ghost btn-sm">&#8595; Export CSV</button>
+                </div>
+              </div>
+              <div id="assignment-conflicts" class="conflicts-banner hidden"></div>
+              <div class="assignment-table-wrap">
+                <table class="assignment-table">
+                  <thead>
+                    <tr>
+                      <th>Date</th><th>Program</th><th>Venue</th><th>Vertical</th>
+                      <th>FOH</th><th>Stage</th><th class="col-flag"></th>
+                    </tr>
+                  </thead>
+                  <tbody id="assignment-tbody"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
         </div>
       </div>
+
+      <!-- AVAILABILITY sub-panel -->
+      <div id="crew-availability" class="crew-sub-panel hidden">
+        <div class="avail-controls">
+          <div class="month-nav">
+            <button id="avail-prev-month" class="btn btn-ghost btn-icon">&#8249;</button>
+            <h3 id="avail-month-label">March 2025</h3>
+            <button id="avail-next-month" class="btn btn-ghost btn-icon">&#8250;</button>
+          </div>
+          <div class="avail-legend">
+            <span class="avail-legend-item avail-legend-off">&#9632; Unavailable</span>
+            <span class="avail-legend-item">Click cell to toggle</span>
+          </div>
+        </div>
+        <div class="avail-table-wrap">
+          <div id="avail-grid" class="avail-grid">
+            <div class="avail-loading">Loading&#8230;</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- WORKLOAD sub-panel -->
+      <div id="crew-workload" class="crew-sub-panel hidden">
+        <div class="workload-controls">
+          <div class="month-nav">
+            <button id="wl-prev-month" class="btn btn-ghost btn-icon">&#8249;</button>
+            <h3 id="wl-month-label">March 2025</h3>
+            <button id="wl-next-month" class="btn btn-ghost btn-icon">&#8250;</button>
+          </div>
+        </div>
+        <div class="workload-table-wrap">
+          <table class="workload-table">
+            <thead><tr><th>Name</th><th>Level</th><th>This Month</th></tr></thead>
+            <tbody id="workload-tbody"><tr><td colspan="3" class="loading-cell">Loading&#8230;</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+
     </div>
 
     <!-- QUOTES TAB -->
@@ -206,6 +287,66 @@
           Edit <code>wrangler.jsonc</code> → <code>vars.SHARED_PASSWORD</code> then push to change.
         </div>
       </div>
+    </div>
+  </div>
+</div>
+
+
+<!-- UPLOAD BATCH MODAL -->
+<div id="upload-modal" class="modal hidden">
+  <div class="modal-backdrop" id="upload-modal-backdrop"></div>
+  <div class="modal-card modal-card--wide">
+    <div class="modal-header">
+      <div class="modal-header-info">
+        <div class="modal-title">Upload Events for Assignment</div>
+        <div class="modal-meta">Paste the month&#39;s event list &#8212; one batch per month</div>
+      </div>
+      <button class="btn btn-ghost btn-icon" id="upload-modal-close">&#10005;</button>
+    </div>
+    <div class="modal-body">
+      <div class="import-hint">
+        <strong>Columns:</strong> Date, Program, Venue, Team, Sound Requirements, Call Time<br>
+        <strong>Date formats:</strong> YYYY-MM-DD &#183; DD-MM-YYYY &#183; DD/MM/YYYY
+      </div>
+      <div class="field">
+        <label for="upload-csv-input">CSV Content</label>
+        <textarea id="upload-csv-input" rows="14" class="mono"
+          placeholder="Date,Program,Venue,Team,Sound Requirements,Call Time&#10;15-03-2025,Spring Concert,Tata Theatre,Dr.Rao/Team,,&#10;..."></textarea>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <div id="upload-result" class="import-result hidden"></div>
+      <button class="btn btn-primary" id="upload-run-btn">Upload Batch</button>
+    </div>
+  </div>
+</div>
+
+<!-- ASSIGNMENT OVERRIDE MODAL -->
+<div id="override-modal" class="modal hidden">
+  <div class="modal-backdrop" id="override-modal-backdrop"></div>
+  <div class="modal-card">
+    <div class="modal-header">
+      <div class="modal-header-info">
+        <div id="override-event-name" class="modal-title"></div>
+        <div id="override-event-meta" class="modal-meta"></div>
+      </div>
+      <button class="btn btn-ghost btn-icon" id="override-modal-close">&#10005;</button>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label for="override-foh-select">FOH</label>
+        <select id="override-foh-select" class="select-input">
+          <option value="">&#8212; Unassigned &#8212;</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Stage Crew</label>
+        <div id="override-stage-list" class="stage-checklist"></div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <div id="override-status" class="save-status"></div>
+      <button class="btn btn-primary" id="override-save-btn">Save Override</button>
     </div>
   </div>
 </div>

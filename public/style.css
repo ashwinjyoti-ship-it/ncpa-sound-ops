@@ -304,3 +304,199 @@ code { font-family: 'JetBrains Mono', monospace; font-size: 12px; background: va
 ::-webkit-scrollbar-track { background: var(--bg-base); }
 ::-webkit-scrollbar-thumb { background: var(--border-lit); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--txt-3); }
+
+/* ═══════════════════════════════════════════════
+   PHASE 2 — Crew Assignment
+   ═══════════════════════════════════════════════ */
+
+/* ── Crew sub-nav ── */
+.crew-sub-nav {
+  display: flex; gap: 0; padding: 0 16px;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border-mid);
+}
+.crew-sub-tab {
+  padding: 10px 18px; background: transparent; border: none; border-bottom: 2px solid transparent;
+  color: var(--txt-2); font-size: 13px; font-weight: 500; cursor: pointer; transition: all 0.12s;
+}
+.crew-sub-tab:hover { color: var(--txt); }
+.crew-sub-tab.active { color: var(--amber); border-bottom-color: var(--amber); }
+.crew-sub-panel { display: none; }
+.crew-sub-panel.active { display: block; }
+
+/* ── Split layout ── */
+.crew-split { display: flex; height: calc(100vh - 100px); overflow: hidden; }
+
+/* ── Batch sidebar ── */
+.batch-sidebar {
+  width: 220px; flex-shrink: 0;
+  background: var(--bg-surface); border-right: 1px solid var(--border-mid);
+  display: flex; flex-direction: column;
+}
+.sidebar-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 14px; border-bottom: 1px solid var(--border-dim);
+  font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--txt-3);
+}
+.batch-list { flex: 1; overflow-y: auto; padding: 6px; }
+.batch-empty { font-size: 12px; color: var(--txt-3); text-align: center; padding: 24px 12px; line-height: 1.6; }
+.batch-item {
+  padding: 9px 11px; border-radius: var(--r-sm); cursor: pointer; margin-bottom: 2px;
+  transition: background 0.1s; border: 1px solid transparent;
+}
+.batch-item:hover { background: var(--bg-raised); }
+.batch-item.active { background: var(--bg-active); border-color: var(--border-lit); }
+.batch-item-month { font-size: 13px; font-weight: 600; color: var(--txt); }
+.batch-item-count { font-size: 11px; color: var(--txt-3); margin-top: 2px; }
+
+/* ── Assignment main ── */
+.assignment-main { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
+.assignment-empty {
+  flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 12px; color: var(--txt-3); font-size: 13px; text-align: center; line-height: 1.6;
+}
+.assignment-empty-icon { font-size: 32px; opacity: 0.3; }
+.assignment-empty span { font-size: 12px; color: var(--txt-3); }
+.assignment-toolbar {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 10px 16px; border-bottom: 1px solid var(--border-dim); flex-shrink: 0;
+}
+.batch-info { font-size: 13px; color: var(--txt-2); }
+.batch-info strong { color: var(--txt); }
+.assignment-actions { display: flex; gap: 6px; }
+.conflicts-banner {
+  display: flex; align-items: flex-start; gap: 8px;
+  padding: 10px 16px; background: rgba(224,85,85,0.07); border-bottom: 1px solid rgba(224,85,85,0.2);
+  font-size: 12px; color: var(--red); flex-shrink: 0;
+}
+.conflicts-banner ul { margin: 4px 0 0 16px; }
+.assignment-table-wrap { flex: 1; overflow: auto; }
+
+/* ── Assignment table ── */
+.assignment-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.assignment-table th {
+  position: sticky; top: 0; z-index: 10;
+  background: var(--bg-raised); padding: 8px 10px; text-align: left;
+  font-size: 11px; font-weight: 600; letter-spacing: 0.07em; text-transform: uppercase;
+  color: var(--txt-3); border-bottom: 1px solid var(--border-mid);
+  /* Skeuomorphic: bottom shadow on header */
+  box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+}
+.assignment-table td { padding: 7px 10px; border-bottom: 1px solid var(--border-deep); vertical-align: middle; }
+.assignment-table tr:hover td { background: rgba(255,255,255,0.02); }
+/* Row states */
+.assignment-row--clean td    { }
+.assignment-row--conflict td { background: rgba(224,85,85,0.05); }
+.assignment-row--manual td   { background: rgba(240,160,48,0.05); }
+.assignment-row--override td { background: rgba(100,150,240,0.05); }
+/* Crew badge (FOH/Stage) */
+.crew-badge {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 3px 8px; border-radius: 20px; font-size: 11px; font-weight: 600;
+  cursor: pointer; transition: opacity 0.1s; white-space: nowrap;
+  border: 1px solid;
+}
+.crew-badge:hover { opacity: 0.75; }
+.crew-badge--foh    { background: rgba(240,160,48,0.12); border-color: var(--amber-dim); color: var(--amber); }
+.crew-badge--stage  { background: rgba(100,150,240,0.1); border-color: rgba(100,150,240,0.35); color: #9ab4f0; }
+.crew-badge--empty  { background: var(--red-tint); border-color: var(--red-border); color: var(--red); }
+.crew-badge--manual { opacity: 0.6; border-style: dashed; }
+.stage-badges       { display: flex; flex-wrap: wrap; gap: 3px; }
+.flag-icon { font-size: 12px; }
+.col-flag { width: 28px; text-align: center; }
+.level-dot {
+  width: 6px; height: 6px; border-radius: 50%; display: inline-block;
+  background: var(--txt-3); flex-shrink: 0;
+}
+.level-dot--senior { background: var(--amber); }
+.level-dot--mid    { background: var(--green); }
+.level-dot--junior { background: #9ab4f0; }
+.level-dot--hired  { background: var(--txt-3); }
+
+/* ── Select / Checklist ── */
+.select-input {
+  width: 100%; padding: 9px 12px;
+  background: var(--bg-raised); border: 1px solid var(--border-mid);
+  border-radius: var(--r-sm); color: var(--txt); font-size: 14px; font-family: inherit;
+  box-shadow: var(--sh-press); outline: none; cursor: pointer;
+}
+.select-input:focus { border-color: var(--amber-dim); box-shadow: var(--sh-press), 0 0 0 3px var(--amber-glow); }
+.stage-checklist {
+  display: flex; flex-direction: column; gap: 4px; max-height: 200px; overflow-y: auto;
+  background: var(--bg-raised); border: 1px solid var(--border-mid);
+  border-radius: var(--r-sm); padding: 8px; box-shadow: var(--sh-press);
+}
+.stage-check-row {
+  display: flex; align-items: center; gap: 8px; padding: 4px 6px;
+  border-radius: 3px; cursor: pointer; transition: background 0.1s; font-size: 13px;
+}
+.stage-check-row:hover { background: var(--bg-hover); }
+.stage-check-row input[type=checkbox] { cursor: pointer; accent-color: var(--amber); }
+.stage-check-row .crew-level-tag { font-size: 10px; color: var(--txt-3); margin-left: auto; }
+
+/* ── Availability grid ── */
+.avail-controls {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  padding: 14px 20px 10px; border-bottom: 1px solid var(--border-dim); flex-wrap: wrap;
+}
+.avail-controls .month-nav h3 { font-size: 16px; font-weight: 600; min-width: 160px; text-align: center; }
+.avail-legend { display: flex; gap: 16px; align-items: center; font-size: 11px; color: var(--txt-3); }
+.avail-legend-item { display: flex; align-items: center; gap: 4px; }
+.avail-legend-off { color: var(--red); }
+.avail-table-wrap { padding: 16px 20px; overflow-x: auto; }
+.avail-grid { display: inline-block; min-width: 100%; }
+.avail-loading { padding: 32px; text-align: center; color: var(--txt-3); }
+
+/* Availability grid is a CSS grid table */
+.avail-header-row, .avail-data-row { display: flex; gap: 2px; margin-bottom: 2px; align-items: center; }
+.avail-crew-cell {
+  width: 100px; flex-shrink: 0;
+  font-size: 12px; font-weight: 500; color: var(--txt-2); padding: 3px 6px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.avail-crew-level { font-size: 10px; color: var(--txt-3); margin-left: 4px; }
+.avail-day-header {
+  width: 26px; text-align: center; flex-shrink: 0;
+  font-size: 10px; color: var(--txt-3); padding: 2px 0; line-height: 1;
+}
+.avail-day-header.weekend { color: var(--txt-2); }
+.avail-cell {
+  width: 26px; height: 26px; flex-shrink: 0;
+  border-radius: 3px; border: 1px solid var(--border-deep);
+  background: var(--bg-surface); cursor: pointer; transition: background 0.1s;
+  display: flex; align-items: center; justify-content: center; font-size: 10px;
+}
+.avail-cell:hover { background: var(--bg-hover); border-color: var(--border-lit); }
+.avail-cell.off { background: rgba(224,85,85,0.18); border-color: var(--red-border); color: var(--red); }
+.avail-cell.off::after { content: '×'; font-weight: 700; }
+.avail-cell.today { border-color: var(--amber-dim); }
+
+/* ── Workload ── */
+.workload-controls { padding: 14px 20px 10px; border-bottom: 1px solid var(--border-dim); }
+.workload-controls .month-nav h3 { font-size: 16px; font-weight: 600; min-width: 160px; text-align: center; }
+.workload-table-wrap { padding: 16px 20px; }
+.workload-table { width: 100%; max-width: 600px; border-collapse: collapse; font-size: 13px; }
+.workload-table th {
+  padding: 8px 12px; text-align: left;
+  font-size: 11px; font-weight: 600; letter-spacing: 0.07em; text-transform: uppercase;
+  color: var(--txt-3); border-bottom: 1px solid var(--border-mid);
+}
+.workload-table td { padding: 8px 12px; border-bottom: 1px solid var(--border-deep); }
+.workload-table tr:hover td { background: rgba(255,255,255,0.02); }
+.wl-count-bar {
+  display: flex; align-items: center; gap: 8px;
+}
+.wl-bar {
+  height: 6px; border-radius: 3px; background: var(--amber);
+  transition: width 0.3s; min-width: 2px;
+}
+.wl-bar-bg { flex: 1; height: 6px; background: var(--border-dim); border-radius: 3px; overflow: hidden; }
+.level-pill {
+  display: inline-block; padding: 2px 7px; border-radius: 20px; font-size: 10px; font-weight: 600;
+  letter-spacing: 0.06em;
+}
+.level-pill--Senior { background: rgba(240,160,48,0.12); color: var(--amber); border: 1px solid var(--amber-dim); }
+.level-pill--Mid    { background: rgba(40,199,111,0.1);  color: var(--green); border: 1px solid var(--green-dim); }
+.level-pill--Junior { background: rgba(100,150,240,0.1); color: #9ab4f0;     border: 1px solid rgba(100,150,240,0.3); }
+.level-pill--Hired  { background: var(--bg-raised); color: var(--txt-3); border: 1px solid var(--border-mid); }
+.loading-cell { color: var(--txt-3); font-size: 12px; text-align: center; padding: 24px; }
