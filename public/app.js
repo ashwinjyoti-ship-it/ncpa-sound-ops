@@ -962,10 +962,6 @@ const q3 = {
   editingEqId: null // null = new, number = editing
 }
 
-const DEL_BODY = (path, body) =>
-  fetch(path, { method: 'DELETE', credentials: 'include',
-    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(r => r.json())
-
 // ── Format rupees ──
 const rupees = n => '₹' + Math.round(n).toLocaleString('en-IN')
 
