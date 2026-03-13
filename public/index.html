@@ -4,89 +4,212 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>NCPA Sound Ops</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
 
-  <!-- LOGIN SCREEN -->
-  <div id="login-screen" class="login-screen hidden">
-    <div class="login-card">
-      <div class="login-logo">
-        <span class="logo-text">NCPA</span>
-        <span class="logo-sub">Sound Operations</span>
+<!-- LOGIN -->
+<div id="login-screen" class="login-screen hidden">
+  <div class="login-card">
+    <div class="login-logo">
+      <div class="login-logo-mark">&#9670;</div>
+      <span class="logo-text">NCPA</span>
+      <span class="logo-sub">Sound Operations</span>
+    </div>
+    <form id="login-form" autocomplete="off">
+      <div class="field">
+        <input type="password" id="password-input" placeholder="Enter password" autocomplete="current-password">
       </div>
-      <form id="login-form" autocomplete="off">
-        <div class="field">
-          <input type="password" id="password-input" placeholder="Password" autocomplete="current-password">
+      <div id="login-error" class="error-msg hidden"></div>
+      <button type="submit" class="btn btn-primary btn-block">Enter</button>
+    </form>
+  </div>
+</div>
+
+<!-- MAIN APP -->
+<div id="app" class="hidden">
+
+  <nav class="top-nav">
+    <div class="nav-brand">NCPA <span>Sound Ops</span></div>
+    <div class="nav-tabs">
+      <button class="nav-tab active" data-tab="events">Events</button>
+      <button class="nav-tab" data-tab="crew">Crew Assignment</button>
+      <button class="nav-tab" data-tab="quotes">Quote Builder</button>
+    </div>
+    <div class="nav-actions">
+      <button id="settings-btn" class="btn btn-ghost btn-icon" title="Settings">&#9881;</button>
+      <button id="logout-btn" class="btn btn-ghost btn-sm">Logout</button>
+    </div>
+  </nav>
+
+  <main class="main-content">
+
+    <!-- EVENTS TAB -->
+    <div id="tab-events" class="tab-panel active">
+      <div class="tab-bar">
+        <div class="month-nav">
+          <button id="prev-month" class="btn btn-ghost btn-icon">&#8249;</button>
+          <h2 id="month-label">Loading…</h2>
+          <button id="next-month" class="btn btn-ghost btn-icon">&#8250;</button>
         </div>
-        <div id="login-error" class="error-msg hidden"></div>
-        <button type="submit" class="btn btn-primary btn-block">Enter</button>
-      </form>
+        <div class="tab-bar-actions">
+          <button id="import-open-btn" class="btn btn-ghost btn-sm">&#8593; Import CSV</button>
+          <button id="export-csv-btn" class="btn btn-ghost btn-sm">&#8595; CSV</button>
+          <button id="export-ical-btn" class="btn btn-ghost btn-sm">&#8595; Calendar</button>
+        </div>
+      </div>
+      <div class="cal-legend">
+        <span class="legend-item legend-item--complete">&#9679; Sound + Call time filled</span>
+        <span class="legend-item legend-item--pending">&#9679; Needs attention</span>
+      </div>
+      <div class="calendar-wrap">
+        <div class="cal-day-names">
+          <div>Mon</div><div>Tue</div><div>Wed</div>
+          <div>Thu</div><div>Fri</div><div>Sat</div><div>Sun</div>
+        </div>
+        <div id="calendar-grid" class="calendar-grid">
+          <div class="cal-loading">Loading events…</div>
+        </div>
+      </div>
+      <!-- Table view hidden in UI — data available in code -->
+      <table id="events-table" style="display:none" aria-hidden="true">
+        <thead><tr><th>Date</th><th>Program</th><th>Venue</th><th>Team</th><th>Sound Requirements</th><th>Call Time</th></tr></thead>
+        <tbody id="events-table-body"></tbody>
+      </table>
+    </div>
+
+    <!-- CREW TAB -->
+    <div id="tab-crew" class="tab-panel hidden">
+      <div class="panel-header">
+        <h2>Crew Assignment</h2>
+        <p class="panel-sub">Upload events · Run assignment engine · Review &amp; override</p>
+      </div>
+      <div class="placeholder-notice">
+        <div class="notice-icon">&#127925;</div>
+        <div class="notice-text">
+          <strong>Phase 2 — Next</strong>
+          <span>Upload your month's events, run the crew assignment engine, review FOH/Stage assignments, override where needed. Export crew CSV.</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- QUOTES TAB -->
+    <div id="tab-quotes" class="tab-panel hidden">
+      <div class="panel-header">
+        <h2>Quote Builder</h2>
+        <p class="panel-sub">Equipment catalog · Build quotes · Export</p>
+      </div>
+      <div class="placeholder-notice">
+        <div class="notice-icon">&#127908;</div>
+        <div class="notice-text">
+          <strong>Phase 3 — Coming</strong>
+          <span>Build quotes from the equipment catalog. Rates managed here. Quotes are not saved — export only.</span>
+        </div>
+      </div>
+    </div>
+
+  </main>
+</div>
+
+<!-- EVENT EDIT MODAL -->
+<div id="event-modal" class="modal hidden">
+  <div class="modal-backdrop" id="event-modal-backdrop"></div>
+  <div class="modal-card">
+    <div class="modal-header">
+      <div class="modal-header-info">
+        <div id="modal-program" class="modal-title"></div>
+        <div id="modal-meta" class="modal-meta"></div>
+      </div>
+      <button class="btn btn-ghost btn-icon" id="event-modal-close">&#10005;</button>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label for="edit-sound">Sound Requirements</label>
+        <textarea id="edit-sound" rows="5" placeholder="e.g. 2 cordless mics, playback laptop, NCPA basic sound, sound check 6pm"></textarea>
+      </div>
+      <div class="field">
+        <label for="edit-calltime">Call Time</label>
+        <input type="text" id="edit-calltime" placeholder="e.g. 2:00pm">
+        <span class="field-hint">Time when sound must be ready</span>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <div id="modal-status" class="save-status"></div>
+      <button class="btn btn-primary" id="modal-save-btn">Save</button>
     </div>
   </div>
+</div>
 
-  <!-- MAIN APP -->
-  <div id="app" class="hidden">
-
-    <!-- TOP NAV -->
-    <nav class="top-nav">
-      <div class="nav-brand">NCPA <span>Sound Ops</span></div>
-      <div class="nav-tabs">
-        <button class="nav-tab active" data-tab="events">Events</button>
-        <button class="nav-tab" data-tab="crew">Crew Assignment</button>
-        <button class="nav-tab" data-tab="quotes">Quote Builder</button>
+<!-- CSV IMPORT MODAL -->
+<div id="import-modal" class="modal hidden">
+  <div class="modal-backdrop" id="import-modal-backdrop"></div>
+  <div class="modal-card modal-card--wide">
+    <div class="modal-header">
+      <div class="modal-header-info">
+        <div class="modal-title">Import Events from CSV</div>
+        <div class="modal-meta">Paste export from old app — imports one month at a time</div>
       </div>
-      <button id="logout-btn" class="btn btn-ghost btn-sm">Logout</button>
-    </nav>
-
-    <!-- TAB PANELS -->
-    <main class="main-content">
-
-      <div id="tab-events" class="tab-panel active">
-        <div class="panel-header">
-          <h2>Events</h2>
-          <p class="panel-sub">Sound schedule management · Calendar view · Month-by-month import</p>
-        </div>
-        <div class="placeholder-notice">
-          <div class="notice-icon">📅</div>
-          <div class="notice-text">
-            <strong>Phase 1 — Coming next</strong>
-            <span>Calendar view, sound requirements editor, CSV import for migrating your existing data month by month.</span>
-          </div>
-        </div>
+      <button class="btn btn-ghost btn-icon" id="import-modal-close">&#10005;</button>
+    </div>
+    <div class="modal-body">
+      <div class="import-hint">
+        <strong>Expected columns:</strong> Date, Program, Venue, Team, Sound Requirements, Call Time<br>
+        <strong>Date formats:</strong> YYYY-MM-DD &nbsp;&#183;&nbsp; DD-MM-YYYY &nbsp;&#183;&nbsp; DD/MM/YYYY
       </div>
-
-      <div id="tab-crew" class="tab-panel hidden">
-        <div class="panel-header">
-          <h2>Crew Assignment</h2>
-          <p class="panel-sub">Upload events · Run assignment engine · Review &amp; override</p>
-        </div>
-        <div class="placeholder-notice">
-          <div class="notice-icon">🎛️</div>
-          <div class="notice-text">
-            <strong>Phase 3 — Coming soon</strong>
-            <span>AI-powered crew assignment engine with FOH/Stage logic, workload balancing, and conflict detection.</span>
-          </div>
-        </div>
+      <div class="field">
+        <label for="import-csv-input">CSV Content</label>
+        <textarea id="import-csv-input" rows="14" class="mono" placeholder="Date,Program,Venue,Team,Sound Requirements,Call Time&#10;12-03-2025,Concert Name,Tata Theatre,Dr.Rao/Team,2 cordless mics,2:00pm"></textarea>
       </div>
-
-      <div id="tab-quotes" class="tab-panel hidden">
-        <div class="panel-header">
-          <h2>Quote Builder</h2>
-          <p class="panel-sub">Equipment catalog · Build quotes · Export PDF</p>
-        </div>
-        <div class="placeholder-notice">
-          <div class="notice-icon">🎤</div>
-          <div class="notice-text">
-            <strong>Phase 4 — Coming soon</strong>
-            <span>Build quotes from your equipment catalog. Rates are live. Quotes are not saved — export only.</span>
-          </div>
-        </div>
-      </div>
-
-    </main>
+    </div>
+    <div class="modal-footer">
+      <div id="import-result" class="import-result hidden"></div>
+      <button class="btn btn-primary" id="import-run-btn">Import</button>
+    </div>
   </div>
+</div>
 
-  <script src="/app.js"></script>
+<!-- SETTINGS MODAL -->
+<div id="settings-modal" class="modal hidden">
+  <div class="modal-backdrop" id="settings-modal-backdrop"></div>
+  <div class="modal-card modal-card--sm">
+    <div class="modal-header">
+      <div class="modal-header-info">
+        <div class="modal-title">Settings</div>
+        <div class="modal-meta">App configuration</div>
+      </div>
+      <button class="btn btn-ghost btn-icon" id="settings-modal-close">&#10005;</button>
+    </div>
+    <div class="modal-body">
+      <div class="settings-section">
+        <div class="settings-section-title">AI Document Parsing</div>
+        <div class="settings-section-desc">Required for parsing Word event schedules into the app.</div>
+        <div class="key-status-row">
+          <span id="ai-key-status-badge" class="key-status-badge">Checking…</span>
+        </div>
+        <div class="field">
+          <label for="ai-key-input">Anthropic API Key</label>
+          <input type="password" id="ai-key-input" placeholder="sk-ant-api03-…" autocomplete="off">
+          <span class="field-hint">Get from console.anthropic.com &#183; Stored securely in database</span>
+        </div>
+        <div class="field-row">
+          <button class="btn btn-primary btn-sm" id="ai-key-save-btn">Save Key</button>
+          <button class="btn btn-ghost btn-sm" id="ai-key-clear-btn" style="display:none">Clear</button>
+        </div>
+        <div id="ai-key-msg" class="save-status" style="display:none"></div>
+      </div>
+      <div class="settings-section settings-section--info">
+        <div class="settings-section-title">Access Password</div>
+        <div class="settings-section-desc">
+          Edit <code>wrangler.jsonc</code> → <code>vars.SHARED_PASSWORD</code> then push to change.
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="/app.js"></script>
 </body>
 </html>
