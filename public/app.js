@@ -892,6 +892,10 @@ document.addEventListener('DOMContentLoaded', () => {
         window._crewInited = true
         await initCrewTab()
       }
+      if (t.dataset.tab === 'quotes' && !window._quotesInited) {
+        window._quotesInited = true
+        initQuotes()
+      }
     })
   })
 
@@ -940,3 +944,262 @@ document.addEventListener('DOMContentLoaded', () => {
     loadWorkload(crew2.wlYear, crew2.wlMonth)
   })
 })
+
+// ═══════════════════════════════════════════════════════════════
+// Phase 3 — Quote Builder
+// Equipment catalog (CRUD) + live quote builder (export only)
+// ═══════════════════════════════════════════════════════════════
+
+const q3 = {
+  catalog: [],      // [{id,name,category,rate_per_item}]
+  lines: [],        // [{id,name,category,rate,qty,days}]
+  editingEqId: null // null = new, number = editing
+}
+
+const DEL_BODY = (path, body) =>
+  fetch(path, { method: 'DELETE', credentials: 'include',
+    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(r => r.json())
+
+// ── Format rupees ──
+const rupees = n => '₹' + Math.round(n).toLocaleString('en-IN')
+
+// ── Load catalog from API ──
+async function loadCatalog() {
+  const tbody = $('catalog-tbody')
+  tbody.innerHTML = '<tr><td colspan="4" class="loading-cell">Loading…</td></tr>'
+  const data = await GET('/api/equipment')
+  if (!data) return
+  q3.catalog = data
+  renderCatalog()
+  buildCategoryFilter()
+}
+
+// ── Build category dropdown ──
+function buildCategoryFilter() {
+  const sel = $('eq-category-filter')
+  const existing = new Set([...sel.options].map(o => o.value).filter(Boolean))
+  const cats = [...new Set(q3.catalog.map(e => e.category).filter(Boolean))].sort()
+  cats.forEach(cat => {
+    if (!existing.has(cat)) {
+      const o = document.createElement('option')
+      o.value = cat; o.textContent = cat; sel.appendChild(o)
+    }
+  })
+}
+
+// ── Render catalog table with current filter/search ──
+function renderCatalog() {
+  const search = ($('eq-search').value || '').toLowerCase()
+  const catF   = $('eq-category-filter').value
+  const list = q3.catalog.filter(e => {
+    if (catF && e.category !== catF) return false
+    if (search && !e.name.toLowerCase().includes(search) && !(e.category||'').toLowerCase().includes(search)) return false
+    return true
+  })
+  const tbody = $('catalog-tbody')
+  if (!list.length) {
+    tbody.innerHTML = '<tr><td colspan="4" class="loading-cell">No items found</td></tr>'
+    return
+  }
+  tbody.innerHTML = list.map(e => `
+    <tr data-eq-id="${e.id}">
+      <td>${escHtml(e.name)}</td>
+      <td><span class="cat-pill">${escHtml(e.category || 'General')}</span></td>
+      <td class="col-rate">${rupees(e.rate_per_item)}</td>
+      <td class="col-actions">
+        <div class="btn-row">
+          <button class="btn btn-ghost btn-xs" onclick="addToQuote(${e.id})">+ Quote</button>
+          <button class="btn btn-ghost btn-xs" onclick="openEqModal(${e.id})">Edit</button>
+          <button class="btn btn-ghost btn-xs" style="color:var(--red)" onclick="deleteEquipment(${e.id})">Del</button>
+        </div>
+      </td>
+    </tr>`).join('')
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')
+}
+
+// ── Open add/edit modal ──
+function openEqModal(id = null) {
+  q3.editingEqId = id
+  $('eq-modal-title').textContent = id ? 'Edit Equipment' : 'Add Equipment'
+  $('eq-modal-status').textContent = ''
+  if (id) {
+    const item = q3.catalog.find(e => e.id === id)
+    if (!item) return
+    $('eq-name-input').value     = item.name
+    $('eq-category-input').value = item.category || ''
+    $('eq-rate-input').value     = item.rate_per_item
+  } else {
+    $('eq-name-input').value     = ''
+    $('eq-category-input').value = ''
+    $('eq-rate-input').value     = ''
+  }
+  $('eq-modal').classList.remove('hidden')
+  setTimeout(() => $('eq-name-input').focus(), 50)
+}
+
+function closeEqModal() { $('eq-modal').classList.add('hidden') }
+
+// ── Save equipment (POST or PUT) ──
+async function saveEquipment() {
+  const name     = $('eq-name-input').value.trim()
+  const category = $('eq-category-input').value.trim() || 'General'
+  const rate     = parseFloat($('eq-rate-input').value)
+  if (!name || isNaN(rate)) {
+    $('eq-modal-status').textContent = 'Name and rate are required.'
+    return
+  }
+  $('eq-modal-status').textContent = 'Saving…'
+  const body = { name, category, rate_per_item: rate }
+  const res = q3.editingEqId
+    ? await PUT(`/api/equipment/${q3.editingEqId}`, body)
+    : await POST('/api/equipment', body)
+  if (res && res.success !== false && !res.error) {
+    closeEqModal()
+    await loadCatalog()
+  } else {
+    $('eq-modal-status').textContent = res?.error || 'Error saving.'
+  }
+}
+
+// ── Delete equipment ──
+async function deleteEquipment(id) {
+  const item = q3.catalog.find(e => e.id === id)
+  if (!item) return
+  if (!confirm(`Delete "${item.name}"?`)) return
+  await DEL(`/api/equipment/${id}`)
+  await loadCatalog()
+}
+
+// ── Add item to quote ──
+function addToQuote(id) {
+  const item = q3.catalog.find(e => e.id === id)
+  if (!item) return
+  const existing = q3.lines.find(l => l.id === id)
+  if (existing) { existing.qty++; }
+  else {
+    q3.lines.push({ id: item.id, name: item.name, category: item.category, rate: item.rate_per_item, qty: 1, days: 1 })
+  }
+  renderQuoteLines()
+}
+
+// ── Render quote lines ──
+function renderQuoteLines() {
+  const tbody = $('quote-lines-tbody')
+  const empty = $('quote-empty')
+  const table = $('quote-lines-table')
+  if (!q3.lines.length) {
+    empty.style.display = ''; table.style.display = 'none'
+    recalcTotals(); return
+  }
+  empty.style.display = 'none'; table.style.display = ''
+  tbody.innerHTML = q3.lines.map((l, i) => {
+    const amt = l.rate * l.qty * l.days
+    return `<tr>
+      <td>${escHtml(l.name)}</td>
+      <td class="col-days"><input class="ql-num" type="number" min="1" value="${l.days}" onchange="updateLine(${i},'days',this.value)"></td>
+      <td class="col-qty"><input class="ql-num" type="number" min="1" value="${l.qty}" onchange="updateLine(${i},'qty',this.value)"></td>
+      <td class="col-rate">${rupees(l.rate)}</td>
+      <td class="col-amount">${rupees(amt)}</td>
+      <td class="col-del"><button class="btn btn-ghost btn-xs" style="color:var(--red)" onclick="removeLine(${i})">&#10005;</button></td>
+    </tr>`
+  }).join('')
+  recalcTotals()
+}
+
+function updateLine(i, field, val) {
+  const n = Math.max(1, parseInt(val) || 1)
+  q3.lines[i][field] = n
+  renderQuoteLines()
+}
+
+function removeLine(i) {
+  q3.lines.splice(i, 1)
+  renderQuoteLines()
+}
+
+// ── Recalculate totals ──
+function recalcTotals() {
+  const subtotal = q3.lines.reduce((s, l) => s + l.rate * l.qty * l.days, 0)
+  const gst      = $('gst-toggle').checked ? subtotal * 0.18 : 0
+  const total    = subtotal + gst
+  $('qt-subtotal').textContent = rupees(subtotal)
+  $('qt-gst').textContent      = rupees(gst)
+  $('qt-total').textContent    = rupees(total)
+}
+
+// ── Export / Print ──
+function exportQuote() {
+  if (!q3.lines.length) { alert('Add items to the quote first.'); return }
+  const client   = $('quote-client').value.trim() || 'NCPA Quote'
+  const gstOn    = $('gst-toggle').checked
+  const subtotal = q3.lines.reduce((s, l) => s + l.rate * l.qty * l.days, 0)
+  const gst      = gstOn ? subtotal * 0.18 : 0
+  const total    = subtotal + gst
+  const date     = new Date().toLocaleDateString('en-IN', { day:'2-digit', month:'short', year:'numeric' })
+
+  const rows = q3.lines.map(l => `
+    <tr>
+      <td>${escHtml(l.name)}</td>
+      <td>${escHtml(l.category||'')}</td>
+      <td style="text-align:center">${l.days}</td>
+      <td style="text-align:center">${l.qty}</td>
+      <td style="text-align:right">₹${l.rate.toLocaleString('en-IN')}</td>
+      <td style="text-align:right; font-weight:600">₹${Math.round(l.rate*l.qty*l.days).toLocaleString('en-IN')}</td>
+    </tr>`).join('')
+
+  const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${escHtml(client)}</title>
+  <style>
+    body { font-family: Arial, sans-serif; font-size: 13px; color: #222; padding: 40px; max-width: 900px; margin: auto; }
+    h1 { font-size: 22px; margin-bottom: 4px; }
+    .meta { color: #666; font-size: 12px; margin-bottom: 28px; }
+    table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
+    th { background: #f0f0f0; padding: 8px 12px; text-align: left; font-size: 11px; letter-spacing: 0.05em; text-transform: uppercase; border-bottom: 2px solid #ddd; }
+    td { padding: 7px 12px; border-bottom: 1px solid #eee; }
+    .totals { margin-left: auto; width: 280px; }
+    .totals td { border: none; padding: 5px 12px; }
+    .grand { font-size: 16px; font-weight: 700; border-top: 2px solid #333 !important; padding-top: 8px !important; }
+    .footer { margin-top: 40px; font-size: 11px; color: #aaa; border-top: 1px solid #eee; padding-top: 12px; }
+    @media print { body { padding: 20px; } }
+  </style></head><body>
+  <h1>${escHtml(client)}</h1>
+  <div class="meta">NCPA Sound Operations &nbsp;·&nbsp; Generated ${date}</div>
+  <table>
+    <thead><tr><th>Item</th><th>Category</th><th style="text-align:center">Days</th><th style="text-align:center">Qty</th><th style="text-align:right">Rate</th><th style="text-align:right">Amount</th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table>
+  <table class="totals">
+    <tr><td>Subtotal</td><td style="text-align:right">₹${Math.round(subtotal).toLocaleString('en-IN')}</td></tr>
+    ${gstOn ? `<tr><td>GST (18%)</td><td style="text-align:right">₹${Math.round(gst).toLocaleString('en-IN')}</td></tr>` : ''}
+    <tr class="grand"><td>Grand Total</td><td style="text-align:right">₹${Math.round(total).toLocaleString('en-IN')}</td></tr>
+  </table>
+  <div class="footer">NCPA Sound Operations · Quote for internal use only. Not a tax invoice.</div>
+  <script>window.onload=()=>{window.print()}<\/script>
+  </body></html>`
+
+  const w = window.open('', '_blank')
+  w.document.write(html)
+  w.document.close()
+}
+
+// ── Init Quote tab ──
+function initQuotes() {
+  loadCatalog()
+
+  on('eq-add-btn',           'click', () => openEqModal(null))
+  on('eq-modal-backdrop',    'click', closeEqModal)
+  on('eq-modal-close',       'click', closeEqModal)
+  on('eq-modal-save',        'click', saveEquipment)
+  on('eq-name-input',        'keydown', e => { if (e.key === 'Enter') saveEquipment() })
+  on('quote-clear-btn',      'click', () => { q3.lines = []; renderQuoteLines() })
+  on('quote-print-btn',      'click', exportQuote)
+  on('gst-toggle',           'change', recalcTotals)
+  on('eq-search',            'input',  renderCatalog)
+  on('eq-category-filter',   'change', renderCatalog)
+
+  // Init display
+  $('quote-lines-table').style.display = 'none'
+  recalcTotals()
+}

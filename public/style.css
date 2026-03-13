@@ -500,3 +500,114 @@ code { font-family: 'JetBrains Mono', monospace; font-size: 12px; background: va
 .level-pill--Junior { background: rgba(100,150,240,0.1); color: #9ab4f0;     border: 1px solid rgba(100,150,240,0.3); }
 .level-pill--Hired  { background: var(--bg-raised); color: var(--txt-3); border: 1px solid var(--border-mid); }
 .loading-cell { color: var(--txt-3); font-size: 12px; text-align: center; padding: 24px; }
+
+/* ═══════════════════════════════════════════════════════════════
+   Phase 3 — Quote Builder
+   ═══════════════════════════════════════════════════════════════ */
+
+/* ── Split layout ── */
+.quote-split {
+  display: grid;
+  grid-template-columns: 1fr 420px;
+  gap: 0;
+  height: calc(100vh - 52px);
+  overflow: hidden;
+}
+
+/* ── Catalog panel (left) ── */
+.catalog-panel {
+  display: flex; flex-direction: column;
+  border-right: 1px solid var(--border-mid);
+  overflow: hidden;
+}
+.catalog-panel-hd {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 16px 20px 12px;
+  border-bottom: 1px solid var(--border-deep);
+}
+.catalog-panel-hd h3 { font-size: 13px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--txt-2); }
+.catalog-filters {
+  display: flex; gap: 8px; padding: 10px 16px;
+  border-bottom: 1px solid var(--border-deep);
+}
+.select-sm, .input-sm { font-size: 12px; padding: 5px 10px; height: 30px; }
+.catalog-filters .text-input { flex: 1; }
+.catalog-table-wrap { flex: 1; overflow-y: auto; }
+.catalog-table {
+  width: 100%; border-collapse: collapse; font-size: 12px;
+}
+.catalog-table thead th {
+  position: sticky; top: 0; z-index: 1;
+  background: var(--bg-surface);
+  padding: 8px 12px; text-align: left;
+  font-size: 10px; font-weight: 600; letter-spacing: 0.07em; text-transform: uppercase;
+  color: var(--txt-3); border-bottom: 1px solid var(--border-mid);
+}
+.catalog-table td { padding: 7px 12px; border-bottom: 1px solid var(--border-deep); color: var(--txt); }
+.catalog-table tr:hover td { background: var(--bg-hover); }
+.catalog-table .col-rate { text-align: right; width: 90px; font-family: 'JetBrains Mono', monospace; }
+.catalog-table .col-actions { width: 110px; text-align: right; }
+.cat-pill {
+  display: inline-block; padding: 1px 7px; border-radius: 20px;
+  font-size: 10px; font-weight: 600; letter-spacing: 0.05em;
+  background: var(--bg-raised); color: var(--txt-2); border: 1px solid var(--border-mid);
+}
+.catalog-table .btn-row { display: flex; gap: 4px; justify-content: flex-end; opacity: 0; transition: opacity 0.1s; }
+.catalog-table tr:hover .btn-row { opacity: 1; }
+
+/* ── Quote panel (right) ── */
+.quote-panel {
+  display: flex; flex-direction: column;
+  background: var(--bg-surface);
+  overflow: hidden;
+}
+.quote-panel-hd {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 16px 20px 12px;
+  border-bottom: 1px solid var(--border-deep);
+}
+.quote-panel-hd h3 { font-size: 13px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--txt-2); white-space: nowrap; }
+.quote-lines-wrap { flex: 1; overflow-y: auto; }
+.quote-lines-table {
+  width: 100%; border-collapse: collapse; font-size: 12px;
+}
+.quote-lines-table thead th {
+  position: sticky; top: 0; z-index: 1;
+  background: var(--bg-surface);
+  padding: 8px 12px; text-align: left;
+  font-size: 10px; font-weight: 600; letter-spacing: 0.07em; text-transform: uppercase;
+  color: var(--txt-3); border-bottom: 1px solid var(--border-mid);
+}
+.quote-lines-table td { padding: 6px 10px; border-bottom: 1px solid var(--border-deep); }
+.quote-lines-table .col-days,
+.quote-lines-table .col-qty  { width: 56px; }
+.quote-lines-table .col-rate,
+.quote-lines-table .col-amount { width: 76px; text-align: right; font-family: 'JetBrains Mono', monospace; color: var(--txt-2); }
+.quote-lines-table .col-amount { color: var(--txt); font-weight: 600; }
+.quote-lines-table .col-del { width: 32px; text-align: center; }
+.ql-num { width: 48px; padding: 3px 6px; font-size: 12px; text-align: center; background: var(--bg-raised); border: 1px solid var(--border-mid); border-radius: var(--r-sm); color: var(--txt); }
+.ql-num:focus { outline: none; border-color: var(--amber-dim); }
+.quote-empty {
+  padding: 40px 20px; text-align: center; color: var(--txt-3); font-size: 12px;
+}
+/* Totals */
+.quote-totals {
+  border-top: 1px solid var(--border-mid); padding: 14px 20px 10px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.totals-row {
+  display: flex; align-items: center; justify-content: space-between;
+  font-size: 12px; color: var(--txt-2);
+}
+.totals-grand { font-size: 15px; font-weight: 700; color: var(--amber); margin-top: 4px; padding-top: 8px; border-top: 1px solid var(--border-mid); }
+.totals-grand span:last-child { font-family: 'JetBrains Mono', monospace; }
+.gst-label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+.gst-label input[type=checkbox] { accent-color: var(--amber); width: 13px; height: 13px; }
+/* Footer actions */
+.quote-footer-actions {
+  border-top: 1px solid var(--border-deep); padding: 12px 16px;
+  display: flex; justify-content: flex-end; gap: 8px;
+}
+
+/* ── Equipment modal small variant ── */
+.modal-card--sm { max-width: 400px; }
