@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NCPA Sound Ops</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+  <!-- LOGIN SCREEN -->
+  <div id="login-screen" class="login-screen hidden">
+    <div class="login-card">
+      <div class="login-logo">
+        <span class="logo-text">NCPA</span>
+        <span class="logo-sub">Sound Operations</span>
+      </div>
+      <form id="login-form" autocomplete="off">
+        <div class="field">
+          <input type="password" id="password-input" placeholder="Password" autocomplete="current-password">
+        </div>
+        <div id="login-error" class="error-msg hidden"></div>
+        <button type="submit" class="btn btn-primary btn-block">Enter</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- MAIN APP -->
+  <div id="app" class="hidden">
+
+    <!-- TOP NAV -->
+    <nav class="top-nav">
+      <div class="nav-brand">NCPA <span>Sound Ops</span></div>
+      <div class="nav-tabs">
+        <button class="nav-tab active" data-tab="events">Events</button>
+        <button class="nav-tab" data-tab="crew">Crew Assignment</button>
+        <button class="nav-tab" data-tab="quotes">Quote Builder</button>
+      </div>
+      <button id="logout-btn" class="btn btn-ghost btn-sm">Logout</button>
+    </nav>
+
+    <!-- TAB PANELS -->
+    <main class="main-content">
+
+      <div id="tab-events" class="tab-panel active">
+        <div class="panel-header">
+          <h2>Events</h2>
+          <p class="panel-sub">Sound schedule management · Calendar view · Month-by-month import</p>
+        </div>
+        <div class="placeholder-notice">
+          <div class="notice-icon">📅</div>
+          <div class="notice-text">
+            <strong>Phase 1 — Coming next</strong>
+            <span>Calendar view, sound requirements editor, CSV import for migrating your existing data month by month.</span>
+          </div>
+        </div>
+      </div>
+
+      <div id="tab-crew" class="tab-panel hidden">
+        <div class="panel-header">
+          <h2>Crew Assignment</h2>
+          <p class="panel-sub">Upload events · Run assignment engine · Review &amp; override</p>
+        </div>
+        <div class="placeholder-notice">
+          <div class="notice-icon">🎛️</div>
+          <div class="notice-text">
+            <strong>Phase 3 — Coming soon</strong>
+            <span>AI-powered crew assignment engine with FOH/Stage logic, workload balancing, and conflict detection.</span>
+          </div>
+        </div>
+      </div>
+
+      <div id="tab-quotes" class="tab-panel hidden">
+        <div class="panel-header">
+          <h2>Quote Builder</h2>
+          <p class="panel-sub">Equipment catalog · Build quotes · Export PDF</p>
+        </div>
+        <div class="placeholder-notice">
+          <div class="notice-icon">🎤</div>
+          <div class="notice-text">
+            <strong>Phase 4 — Coming soon</strong>
+            <span>Build quotes from your equipment catalog. Rates are live. Quotes are not saved — export only.</span>
+          </div>
+        </div>
+      </div>
+
+    </main>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

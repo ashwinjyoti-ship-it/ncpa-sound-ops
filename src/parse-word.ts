@@ -1,9 +1,5 @@
 import { Hono } from 'hono'
-
-type Bindings = {
-  DB: D1Database
-  ANTHROPIC_API_KEY: string
-}
+import type { Bindings } from './types'
 
 // Helper: Parse a chunk of document text with Claude Sonnet 4
 // EXACT implementation from ncpa-sound-manager
