@@ -1,5 +1,6 @@
 import { Hono } from 'hono'
 import type { Bindings } from './types'
+import { mapVenue, mapTeamToVertical, VENUE_DEFAULTS, isManualOnlyVenue, isSuspiciousVenue } from './crew-endpoints'
 
 export function setupEventsEndpoints(app: Hono<{ Bindings: Bindings }>) {
 
@@ -90,6 +91,8 @@ export function setupEventsEndpoints(app: Hono<{ Bindings: Bindings }>) {
     const imported: string[] = []
     const skipped: string[] = []
     const errors: string[] = []
+    // Generate a batch_id for this import so events appear in Crew Automation
+    const batchId = `import_${Date.now()}`
 
     for (let i = 1; i < lines.length; i++) {
       if (!lines[i].trim()) continue
@@ -142,10 +145,18 @@ export function setupEventsEndpoints(app: Hono<{ Bindings: Bindings }>) {
           ).bind(venue, team, soundReq, callTime, existing.id).run()
           skipped.push(`Row ${i + 1}: updated existing (${eventDate} ${program})`)
         } else {
+          const { mapped: venueNorm, isMultiVenue } = mapVenue(venue)
+          const vertical = mapTeamToVertical(team)
+          const manualCheck = isManualOnlyVenue(venue)
+          const suspicious = isSuspiciousVenue(venue)
+          const needsManual = manualCheck.manual || isMultiVenue || suspicious ? 1 : 0
+          const manualReason = suspicious ? (manualCheck.reason ? manualCheck.reason + '; Suspicious venue' : 'Suspicious venue')
+            : (isMultiVenue ? 'Multi-venue event' : manualCheck.reason)
+          const stageCrew = suspicious ? 1 : (needsManual ? 0 : (VENUE_DEFAULTS[venueNorm] || 1))
           await DB.prepare(
-            `INSERT INTO events (event_date, program, venue, team, sound_requirements, call_time)
-             VALUES (?, ?, ?, ?, ?, ?)`
-          ).bind(eventDate, program, venue, team, soundReq, callTime).run()
+            `INSERT INTO events (batch_id, event_date, program, venue, venue_normalized, team, vertical, sound_requirements, call_time, stage_crew_needed, needs_manual_review, manual_flag_reason)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          ).bind(batchId, eventDate, program, venue, venueNorm, team, vertical, soundReq, callTime, stageCrew, needsManual, manualReason || null).run()
           imported.push(`${eventDate} — ${program}`)
         }
       } catch (err: any) {

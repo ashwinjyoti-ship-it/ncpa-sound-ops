@@ -292,6 +292,10 @@
         <label for="edit-notes">Notes</label>
         <textarea id="edit-notes" rows="3" placeholder="Internal notes…"></textarea>
       </div>
+      <div class="field" id="modal-crew-section" style="display:none">
+        <label>Assigned Crew</label>
+        <div id="modal-crew-list" class="crew-assign-display"></div>
+      </div>
     </div>
     <div class="modal-footer">
       <div id="modal-status" class="save-status"></div>
@@ -317,8 +321,14 @@
         <strong>Date formats:</strong> YYYY-MM-DD &nbsp;&#183;&nbsp; DD-MM-YYYY &nbsp;&#183;&nbsp; DD/MM/YYYY
       </div>
       <div class="field">
-        <label for="import-csv-input">CSV Content</label>
-        <textarea id="import-csv-input" rows="14" class="mono" placeholder="Date,Program,Venue,Team,Sound Requirements,Call Time&#10;12-03-2025,Concert Name,Tata Theatre,Dr.Rao/Team,2 cordless mics,2:00pm"></textarea>
+        <label>Upload CSV File</label>
+        <div class="file-pick-row">
+          <button type="button" class="btn btn-ghost btn-sm" id="import-file-btn">Choose File</button>
+          <span id="import-file-name" class="file-name-label">No file chosen</span>
+          <input type="file" id="import-file-input" accept=".csv,.txt" class="hidden">
+        </div>
+        <label for="import-csv-input" style="margin-top:8px">Or paste CSV text</label>
+        <textarea id="import-csv-input" rows="8" class="mono" placeholder="Date,Program,Venue,Team,Sound Requirements,Call Time&#10;12-03-2025,Concert Name,Tata Theatre,Dr.Rao/Team,2 cordless mics,2:00pm"></textarea>
       </div>
     </div>
     <div class="modal-footer">
@@ -385,8 +395,14 @@
         <strong>Date formats:</strong> YYYY-MM-DD &#183; DD-MM-YYYY &#183; DD/MM/YYYY
       </div>
       <div class="field">
-        <label for="upload-csv-input">CSV Content</label>
-        <textarea id="upload-csv-input" rows="14" class="mono"
+        <label>Upload CSV File</label>
+        <div class="file-pick-row">
+          <button type="button" class="btn btn-ghost btn-sm" id="upload-file-btn">Choose File</button>
+          <span id="upload-file-name" class="file-name-label">No file chosen</span>
+          <input type="file" id="upload-file-input" accept=".csv,.txt" class="hidden">
+        </div>
+        <label for="upload-csv-input" style="margin-top:8px">Or paste CSV text</label>
+        <textarea id="upload-csv-input" rows="8" class="mono"
           placeholder="Date,Program,Venue,Team,Sound Requirements,Call Time&#10;15-03-2025,Spring Concert,Tata Theatre,Dr.Rao/Team,,&#10;..."></textarea>
       </div>
     </div>

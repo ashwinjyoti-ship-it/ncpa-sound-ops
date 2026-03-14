@@ -204,8 +204,26 @@ function openEventModal(id) {
   $('modal-status').textContent  = ''
   $('modal-status').className    = 'save-status'
 
+  // Reset crew section
+  $('modal-crew-section').style.display = 'none'
+  $('modal-crew-list').innerHTML = ''
+
   $('event-modal').classList.remove('hidden')
   $('edit-sound').focus()
+
+  // Fetch crew assignments asynchronously
+  GET(`/api/events/${id}/assignments`).then(crew => {
+    if (!Array.isArray(crew) || !crew.length) return
+    const foh = crew.filter(c => c.role === 'FOH')
+    const stage = crew.filter(c => c.role === 'Stage')
+    let html = ''
+    if (foh.length) html += `<span class="crew-badge crew-badge--foh">FOH: ${foh.map(c => c.name).join(', ')}</span> `
+    if (stage.length) html += `<span class="crew-badge">Stage: ${stage.map(c => c.name).join(', ')}</span>`
+    if (html) {
+      $('modal-crew-list').innerHTML = html
+      $('modal-crew-section').style.display = ''
+    }
+  }).catch(() => {})
 }
 
 function closeEventModal() {
@@ -249,10 +267,11 @@ async function saveEvent() {
 // ═══════════════════ CSV IMPORT MODAL ═══════════════════
 function openImportModal() {
   $('import-csv-input').value = ''
+  $('import-file-input').value = ''
+  $('import-file-name').textContent = 'No file chosen'
   $('import-result').className = 'import-result hidden'
   $('import-result').textContent = ''
   $('import-modal').classList.remove('hidden')
-  $('import-csv-input').focus()
 }
 function closeImportModal() { $('import-modal').classList.add('hidden') }
 
@@ -402,6 +421,20 @@ document.addEventListener('DOMContentLoaded', async () => {
   on('import-run-btn',  'click', runImport)
   on('import-modal-close',   'click', closeImportModal)
   on('import-modal-backdrop','click', closeImportModal)
+
+  // ── File pickers ──
+  on('import-file-btn', 'click', () => $('import-file-input').click())
+  $('import-file-input').addEventListener('change', e => {
+    const file = e.target.files[0]; if (!file) return
+    $('import-file-name').textContent = file.name
+    const r = new FileReader(); r.onload = ev => { $('import-csv-input').value = ev.target.result }; r.readAsText(file)
+  })
+  on('upload-file-btn', 'click', () => $('upload-file-input').click())
+  $('upload-file-input').addEventListener('change', e => {
+    const file = e.target.files[0]; if (!file) return
+    $('upload-file-name').textContent = file.name
+    const r = new FileReader(); r.onload = ev => { $('upload-csv-input').value = ev.target.result }; r.readAsText(file)
+  })
 
   // ── Event modal ──
   on('event-modal-close',    'click', closeEventModal)
@@ -695,9 +728,10 @@ async function saveOverride() {
 // ── Upload batch ──
 function openUploadModal() {
   $('upload-csv-input').value = ''
+  $('upload-file-input').value = ''
+  $('upload-file-name').textContent = 'No file chosen'
   $('upload-result').classList.add('hidden')
   $('upload-modal').classList.remove('hidden')
-  $('upload-csv-input').focus()
 }
 function closeUploadModal() { $('upload-modal').classList.add('hidden') }
 

@@ -611,3 +611,11 @@ code { font-family: 'JetBrains Mono', monospace; font-size: 12px; background: va
 
 /* ── Equipment modal small variant ── */
 .modal-card--sm { max-width: 400px; }
+
+/* ── File picker row ── */
+.file-pick-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.file-name-label { font-size: 12px; color: var(--txt-2); }
+input[type=file].hidden { display: none; }
+
+/* ── Crew display in event modal ── */
+.crew-assign-display { display: flex; flex-wrap: wrap; gap: 6px; padding: 2px 0; }
