@@ -406,6 +406,14 @@ function exportICal() {
   const m = monthStr(state.year, state.month)
   window.open(`/api/events/export/ical?month=${m}`, '_blank')
 }
+async function clearAllEvents() {
+  if (!confirm('Delete ALL events from the database? This cannot be undone.')) return
+  const res = await api('DELETE', '/api/events/all')
+  if (res.success) {
+    alert(`Cleared ${res.deleted} events. Ready for fresh CSV import.`)
+    loadMonth(state.year, state.month)
+  }
+}
 
 // ═══════════════════ SETTINGS MODAL ═══════════════════
 async function openSettingsModal() {
@@ -513,6 +521,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   on('export-csv-btn',  'click', exportCSV)
   on('export-ical-btn', 'click', exportICal)
   on('import-open-btn', 'click', openImportModal)
+  on('clear-all-events-btn', 'click', clearAllEvents)
   on('import-run-btn',  'click', runImport)
   on('dedup-run-btn',   'click', runDeduplicate)
   on('import-modal-close',   'click', closeImportModal)

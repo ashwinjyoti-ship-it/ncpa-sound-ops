@@ -200,6 +200,13 @@ export function setupEventsEndpoints(app: Hono<{ Bindings: Bindings }>) {
     })
   })
 
+  // Clear ALL events from the database
+  app.delete('/api/events/all', async (c) => {
+    const { DB } = c.env
+    const result = await DB.prepare('DELETE FROM events').run()
+    return c.json({ success: true, deleted: result.meta.changes || 0 })
+  })
+
   // Deduplicate events — keep the row with the most data for each date+program+venue
   app.post('/api/events/deduplicate', async (c) => {
     const { DB } = c.env
