@@ -137,12 +137,15 @@ function renderCalendar() {
     let evHtml = ''
     const visible = dayEvts.slice(0, 3)
     for (const e of visible) {
-      const cls = isComplete(e) ? 'cal-event--complete' : 'cal-event--pending'
-      const vc  = venueCode(e.venue)
+      const cls  = isComplete(e) ? 'cal-event--complete' : 'cal-event--pending'
+      const vc   = venueCode(e.venue)
       const name = (e.program || '').replace(/</g, '&lt;')
+      const team = (e.team || '').replace(/</g, '&lt;')
       evHtml += `<div class="cal-event ${cls}" data-id="${e.id}" title="${name}">`
-               + `<span class="cal-event-venue">${vc}</span>`
-               + `<span class="cal-event-name">${name}</span></div>`
+              + `<div class="cal-event-program">${name}</div>`
+              + `<div class="cal-event-meta"><i class="fas fa-map-marker-alt"></i>${vc}</div>`
+              + (team ? `<div class="cal-event-meta"><i class="fas fa-users"></i>${team}</div>` : '')
+              + `</div>`
     }
     if (dayEvts.length > 3) {
       evHtml += `<div class="cal-event-more">+${dayEvts.length - 3} more</div>`
@@ -189,41 +192,47 @@ async function loadMonth(year, month) {
   renderCalendar()
 }
 
-// ═══════════════════ EVENT EDIT MODAL ═══════════════════
+// ═══════════════════ EVENT VIEW MODAL (read-only) ═══════════════════
+function fmtDate(d) {
+  if (!d) return '—'
+  const [y, m, day] = d.split('-')
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+  return `${parseInt(day)} ${months[parseInt(m)-1]} ${y}`
+}
+
+function viewRow(label, value, empty) {
+  const val = value ? `<div class="event-view-value">${value}</div>`
+                    : `<div class="event-view-value event-view-value--empty">${empty || 'Not specified'}</div>`
+  return `<div class="event-view-row"><div class="event-view-label">${label}</div>${val}</div>`
+}
+
 function openEventModal(id) {
   const ev = state.events.find(e => String(e.id) === String(id))
   if (!ev) return
   state.currentEventId = id
 
-  $('edit-program').value  = ev.program || ''
-  $('edit-date').value     = ev.event_date || ''
-  $('edit-venue').value    = ev.venue || ''
-  $('edit-team').value     = ev.team || ''
-  $('edit-sound').value    = ev.sound_requirements || ''
-  $('edit-calltime').value = ev.call_time || ''
-  $('edit-rider').value    = ev.rider || ''
-  $('edit-notes').value    = ev.notes || ''
-  $('modal-status').textContent = ''
-  $('modal-status').className   = 'save-status'
+  let html = viewRow('Date', fmtDate(ev.event_date))
+           + viewRow('Program / Event', ev.program)
+           + viewRow('Venue', ev.venue)
+           + viewRow('Team (curator)', ev.team)
+           + viewRow('Sound Requirements', ev.sound_requirements ? ev.sound_requirements.replace(/\n/g,'<br>') : '')
+           + viewRow('Call Time', ev.call_time)
+  if (ev.rider)  html += viewRow('Rider', ev.rider.replace(/\n/g,'<br>'))
+  if (ev.notes)  html += viewRow('Notes', ev.notes.replace(/\n/g,'<br>'))
 
-  // Reset crew section
-  $('modal-crew-section').style.display = 'none'
-  $('modal-crew-list').innerHTML = ''
-
+  $('event-view-body').innerHTML = html
   $('event-modal').classList.remove('hidden')
-  $('edit-program').focus()
 
-  // Fetch crew assignments asynchronously
+  // Fetch assigned crew and append
   GET(`/api/events/${id}/assignments`).then(crew => {
     if (!Array.isArray(crew) || !crew.length) return
-    const foh = crew.filter(c => c.role === 'FOH')
-    const stage = crew.filter(c => c.role === 'Stage')
-    let html = ''
-    if (foh.length) html += `<span class="crew-badge crew-badge--foh">FOH: ${foh.map(c => c.name).join(', ')}</span> `
-    if (stage.length) html += `<span class="crew-badge">Stage: ${stage.map(c => c.name).join(', ')}</span>`
-    if (html) {
-      $('modal-crew-list').innerHTML = html
-      $('modal-crew-section').style.display = ''
+    const foh   = crew.filter(c => c.role === 'FOH').map(c => c.name).join(', ')
+    const stage = crew.filter(c => c.role === 'Stage').map(c => c.name).join(', ')
+    let crewHtml = ''
+    if (foh)   crewHtml += `<span class="crew-badge crew-badge--foh">FOH: ${foh}</span> `
+    if (stage) crewHtml += `<span class="crew-badge">Stage: ${stage}</span>`
+    if (crewHtml) {
+      $('event-view-body').innerHTML += viewRow('Assigned Crew', crewHtml)
     }
   }).catch(() => {})
 }
@@ -233,13 +242,42 @@ function closeEventModal() {
   state.currentEventId = null
 }
 
+// ═══════════════════ EVENT EDIT MODAL ═══════════════════
+function openEditModal(id) {
+  const ev = state.events.find(e => String(e.id) === String(id || state.currentEventId))
+  if (!ev) return
+  state.currentEventId = String(ev.id)
+
+  $('edit-program').value  = ev.program || ''
+  $('edit-date').value     = ev.event_date || ''
+  $('edit-venue').value    = ev.venue || ''
+  // team is a select — try to match option value
+  const sel = $('edit-team')
+  sel.value = ev.team || ''
+  if (!sel.value) sel.value = '' // fallback to blank if no match
+  $('edit-sound').value    = ev.sound_requirements || ''
+  $('edit-calltime').value = ev.call_time || ''
+  $('edit-rider').value    = ev.rider || ''
+  $('edit-notes').value    = ev.notes || ''
+  $('modal-status').textContent = ''
+  $('modal-status').className   = 'save-status'
+
+  $('event-modal').classList.add('hidden') // close view modal
+  $('edit-modal').classList.remove('hidden')
+  $('edit-program').focus()
+}
+
+function closeEditModal() {
+  $('edit-modal').classList.add('hidden')
+}
+
 async function saveEvent() {
   const id = state.currentEventId
   if (!id) return
   const program = $('edit-program').value.trim()
   const date    = $('edit-date').value.trim()
   const venue   = $('edit-venue').value.trim()
-  const team    = $('edit-team').value.trim()
+  const team    = $('edit-team').value
   const sound   = $('edit-sound').value.trim()
   const call    = $('edit-calltime').value.trim()
   const rider   = $('edit-rider').value.trim() || null
@@ -260,7 +298,7 @@ async function saveEvent() {
     renderCalendar()
     st.textContent = '✓ Saved'
     st.className   = 'save-status save-status--ok'
-    setTimeout(closeEventModal, 800)
+    setTimeout(closeEditModal, 800)
   } else {
     st.textContent = result?.error || 'Save failed'
     st.className   = 'save-status save-status--err'
@@ -271,15 +309,12 @@ async function deleteEvent() {
   const id = state.currentEventId
   if (!id) return
   if (!confirm('Delete this event? This cannot be undone.')) return
-  const st = $('modal-status')
-  st.textContent = 'Deleting…'; st.className = 'save-status'
   const result = await DEL(`/api/events/${id}`)
   if (result?.success !== false) {
     state.events = state.events.filter(e => String(e.id) !== String(id))
     renderCalendar()
     closeEventModal()
-  } else {
-    st.textContent = 'Delete failed'; st.className = 'save-status save-status--err'
+    closeEditModal()
   }
 }
 
@@ -455,11 +490,17 @@ document.addEventListener('DOMContentLoaded', async () => {
     const r = new FileReader(); r.onload = ev => { $('upload-csv-input').value = ev.target.result }; r.readAsText(file)
   })
 
-  // ── Event modal ──
+  // ── Event view modal ──
   on('event-modal-close',    'click', closeEventModal)
   on('event-modal-backdrop', 'click', closeEventModal)
-  on('modal-save-btn',       'click', saveEvent)
   on('modal-delete-btn',     'click', deleteEvent)
+  on('modal-edit-btn',       'click', () => openEditModal())
+
+  // ── Event edit modal ──
+  on('edit-modal-close',     'click', closeEditModal)
+  on('edit-modal-backdrop',  'click', closeEditModal)
+  on('edit-modal-cancel',    'click', closeEditModal)
+  on('modal-save-btn',       'click', saveEvent)
   on('edit-sound', 'keydown', e => { if (e.ctrlKey && e.key === 'Enter') saveEvent() })
 
   // ── Settings ──
@@ -472,8 +513,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   // ── Keyboard: Esc closes modals ──
   document.addEventListener('keydown', e => {
     if (e.key !== 'Escape') return
-    if (!$('event-modal').classList.contains('hidden'))    closeEventModal()
-    else if (!$('import-modal').classList.contains('hidden'))   closeImportModal()
+    if (!$('edit-modal').classList.contains('hidden'))         closeEditModal()
+    else if (!$('event-modal').classList.contains('hidden'))   closeEventModal()
+    else if (!$('import-modal').classList.contains('hidden'))  closeImportModal()
     else if (!$('settings-modal').classList.contains('hidden')) closeSettingsModal()
   })
 })

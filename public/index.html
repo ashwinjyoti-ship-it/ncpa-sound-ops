@@ -8,6 +8,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 </head>
 <body>
 
@@ -264,39 +265,83 @@
 </div>
 
 <!-- EVENT EDIT MODAL -->
+<!-- EVENT VIEW MODAL — read-only, matches original -->
 <div id="event-modal" class="modal hidden">
   <div class="modal-backdrop" id="event-modal-backdrop"></div>
   <div class="modal-card">
     <div class="modal-header">
       <div class="modal-header-info">
-        <div class="modal-title">Edit Event</div>
+        <div class="modal-title">Event Details</div>
       </div>
       <button class="btn btn-ghost btn-icon" id="event-modal-close">&#10005;</button>
+    </div>
+    <div class="modal-body" id="event-view-body">
+      <!-- populated by JS -->
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-danger" id="modal-delete-btn">Delete</button>
+      <div style="flex:1"></div>
+      <button class="btn btn-ghost" id="modal-edit-btn"><i class="fas fa-edit"></i> Edit</button>
+    </div>
+  </div>
+</div>
+
+<!-- EVENT EDIT MODAL — full form, matches original -->
+<div id="edit-modal" class="modal hidden">
+  <div class="modal-backdrop" id="edit-modal-backdrop"></div>
+  <div class="modal-card modal-card--wide">
+    <div class="modal-header">
+      <div class="modal-header-info">
+        <div class="modal-title">Edit Event</div>
+      </div>
+      <button class="btn btn-ghost btn-icon" id="edit-modal-close">&#10005;</button>
     </div>
     <div class="modal-body">
       <div class="field-row">
         <div class="field field--grow">
-          <label for="edit-program">Event Name</label>
+          <label for="edit-program">Program / Event *</label>
           <input type="text" id="edit-program" placeholder="e.g. Spring Concert">
         </div>
         <div class="field">
-          <label for="edit-date">Date</label>
+          <label for="edit-date">Date *</label>
           <input type="date" id="edit-date">
         </div>
       </div>
-      <div class="field-row">
-        <div class="field field--grow">
-          <label for="edit-venue">Venue</label>
-          <input type="text" id="edit-venue" placeholder="e.g. Tata Theatre">
-        </div>
-        <div class="field field--grow">
-          <label for="edit-team">Team</label>
-          <input type="text" id="edit-team" placeholder="e.g. Dr.Rao/Team">
-        </div>
+      <div class="field">
+        <label for="edit-venue">Venue *</label>
+        <input type="text" id="edit-venue" list="venue-datalist" placeholder="Select or type venue">
+        <datalist id="venue-datalist">
+          <option value="JBT">Jamshed Bhabha Theatre</option>
+          <option value="Tata Theatre">Tata Theatre</option>
+          <option value="TT">TT (Tata Theatre)</option>
+          <option value="Experimental Theatre">Experimental Theatre</option>
+          <option value="Godrej Dance Theatre">Godrej Dance Theatre</option>
+          <option value="Little Theatre">Little Theatre</option>
+          <option value="Sea View Room">Sea View Room</option>
+          <option value="Library">Library</option>
+          <option value="DPAG">DPAG</option>
+          <option value="Sunken Garden">Sunken Garden</option>
+        </datalist>
+      </div>
+      <div class="field">
+        <label for="edit-team">Team (curator)</label>
+        <select id="edit-team">
+          <option value="">Select Team…</option>
+          <option value="Bruce/Team">Bruce/Team</option>
+          <option value="Dr.Rao/Team">Dr.Rao/Team</option>
+          <option value="Dr.Swapno/Team">Dr.Swapno/Team</option>
+          <option value="Farrahnaz/Team">Farrahnaz/Team</option>
+          <option value="Bianca/Team">Bianca/Team</option>
+          <option value="Dr.Sujata/Team">Dr.Sujata/Team</option>
+          <option value="Nooshin/Team">Nooshin/Team</option>
+          <option value="DPAG">DPAG</option>
+          <option value="DP">DP</option>
+          <option value="Others">Others</option>
+        </select>
       </div>
       <div class="field">
         <label for="edit-sound">Sound Requirements</label>
-        <textarea id="edit-sound" rows="4" placeholder="e.g. 2 cordless mics, playback laptop, NCPA basic sound, sound check 6pm"></textarea>
+        <textarea id="edit-sound" rows="3" placeholder="e.g. 2 cordless mics, playback laptop, NCPA basic sound, sound check 6pm"></textarea>
       </div>
       <div class="field">
         <label for="edit-calltime">Call Time</label>
@@ -310,15 +355,11 @@
         <label for="edit-notes">Notes</label>
         <textarea id="edit-notes" rows="2" placeholder="Internal notes…"></textarea>
       </div>
-      <div class="field" id="modal-crew-section" style="display:none">
-        <label>Assigned Crew</label>
-        <div id="modal-crew-list" class="crew-assign-display"></div>
-      </div>
     </div>
     <div class="modal-footer">
-      <button class="btn btn-danger" id="modal-delete-btn">Delete</button>
       <div id="modal-status" class="save-status"></div>
-      <button class="btn btn-primary" id="modal-save-btn">Save</button>
+      <button class="btn btn-ghost" id="edit-modal-cancel">Cancel</button>
+      <button class="btn btn-primary" id="modal-save-btn">Save Changes</button>
     </div>
   </div>
 </div>

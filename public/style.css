@@ -86,14 +86,16 @@ code { font-family: 'JetBrains Mono', monospace; font-size: 12px; background: va
 .field { margin-bottom: 16px; }
 .field label { display: block; font-size: 12px; font-weight: 500; color: var(--txt-2); margin-bottom: 6px; letter-spacing: 0.04em; }
 .field input,
-.field textarea {
+.field textarea,
+.field select {
   width: 100%; padding: 10px 13px;
   background: var(--bg-raised); border: 1px solid var(--border-mid);
   border-radius: var(--r-sm); color: var(--txt); font-size: 14px; font-family: inherit;
   outline: none; resize: vertical; transition: border-color 0.15s;
   box-shadow: var(--sh-press);
 }
-.field input:focus, .field textarea:focus { border-color: var(--amber-dim); box-shadow: var(--sh-press), 0 0 0 3px var(--amber-glow); }
+.field select { resize: none; cursor: pointer; }
+.field input:focus, .field textarea:focus, .field select:focus { border-color: var(--amber-dim); box-shadow: var(--sh-press), 0 0 0 3px var(--amber-glow); }
 .field-hint { display: block; font-size: 11px; color: var(--txt-3); margin-top: 5px; }
 .field-row { display: flex; gap: 10px; align-items: flex-start; }
 .field--grow { flex: 1; }
@@ -206,29 +208,38 @@ code { font-family: 'JetBrains Mono', monospace; font-size: 12px; background: va
 }
 .cal-cell-weekend .cal-cell-date { color: var(--txt-2); }
 
-/* Event items in calendar */
+/* Event cards in calendar — match original card format */
 .cal-event {
-  display: flex; align-items: flex-start; gap: 4px;
-  padding: 4px 6px; margin-bottom: 3px;
+  display: block;
+  padding: 5px 7px; margin-bottom: 4px;
   border-radius: 4px; cursor: pointer;
-  font-size: 11.5px; line-height: 1.4;
-  border-left: 3px solid; overflow: hidden;
-  transition: opacity 0.1s;
+  border-left: 4px solid;
+  background: var(--bg-raised);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.25);
+  transition: opacity 0.12s, box-shadow 0.12s;
+  overflow: hidden;
 }
-.cal-event:hover { opacity: 0.82; }
-/* Complete (green) — both sound + call time filled */
-.cal-event--complete {
-  background: var(--green-tint); border-left-color: var(--green);
-  color: var(--green);
+.cal-event:hover { opacity: 0.88; box-shadow: 0 2px 8px rgba(0,0,0,0.4); }
+.cal-event--complete { border-left-color: var(--green); }
+.cal-event--pending  { border-left-color: var(--amber); }
+.cal-event-program {
+  font-size: 11px; font-weight: 600; color: var(--txt);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  margin-bottom: 2px;
 }
-/* Pending (amber) — missing sound req or call time */
-.cal-event--pending {
-  background: var(--amber-tint); border-left-color: var(--amber);
-  color: var(--amber);
+.cal-event-meta {
+  font-size: 10px; color: var(--txt-2);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  display: flex; align-items: center; gap: 3px;
 }
-.cal-event-venue { font-size: 9.5px; font-weight: 700; opacity: 0.7; flex-shrink: 0; margin-top: 2px; letter-spacing: 0.04em; }
-.cal-event-name { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; flex: 1; }
+.cal-event-meta i { font-size: 9px; opacity: 0.7; flex-shrink: 0; }
 .cal-event-more { font-size: 10px; color: var(--txt-3); padding: 2px 5px; }
+
+/* Event view modal — label/value pairs */
+.event-view-row { margin-bottom: 14px; }
+.event-view-label { font-size: 11px; font-weight: 600; color: var(--txt-3); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 3px; }
+.event-view-value { font-size: 13px; color: var(--txt); line-height: 1.5; white-space: pre-wrap; }
+.event-view-value--empty { color: var(--txt-3); font-style: italic; }
 
 /* ═══════════════════════ MODALS ═══════════════════════ */
 .modal { position: fixed; inset: 0; z-index: 500; display: flex; align-items: center; justify-content: center; padding: 16px; }
