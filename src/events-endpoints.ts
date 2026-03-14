@@ -67,6 +67,19 @@ export function setupEventsEndpoints(app: Hono<{ Bindings: Bindings }>) {
     return c.json({ success: true })
   })
 
+  // Clear events — all or by month (YYYY-MM). Must be before /:id route.
+  app.delete('/api/events/clear', async (c) => {
+    const { DB } = c.env
+    const month = c.req.query('month') // optional YYYY-MM
+    let result
+    if (month) {
+      result = await DB.prepare('DELETE FROM events WHERE event_date LIKE ?').bind(`${month}%`).run()
+    } else {
+      result = await DB.prepare('DELETE FROM events').run()
+    }
+    return c.json({ success: true, deleted: result.meta.changes || 0 })
+  })
+
   // Delete event
   app.delete('/api/events/:id', async (c) => {
     const { DB } = c.env
@@ -198,13 +211,6 @@ export function setupEventsEndpoints(app: Hono<{ Bindings: Bindings }>) {
       errors: errors.length,
       details: { imported, skipped, errors }
     })
-  })
-
-  // Clear ALL events from the database
-  app.delete('/api/events/all', async (c) => {
-    const { DB } = c.env
-    const result = await DB.prepare('DELETE FROM events').run()
-    return c.json({ success: true, deleted: result.meta.changes || 0 })
   })
 
   // Deduplicate events — keep the row with the most data for each date+program+venue

@@ -368,6 +368,7 @@ async function runImport() {
     res.textContent = msg
     res.className = errors > 0 ? 'import-result import-result--err' : 'import-result import-result--ok'
     loadMonth(state.year, state.month)
+    populateClearMonthSelect()
   } else {
     res.textContent = result?.error || 'Import failed'
     res.className = 'import-result import-result--err'
@@ -406,11 +407,31 @@ function exportICal() {
   const m = monthStr(state.year, state.month)
   window.open(`/api/events/export/ical?month=${m}`, '_blank')
 }
+async function populateClearMonthSelect() {
+  const months = await GET('/api/events')
+  const sel = $('clear-month-select')
+  if (!sel || !Array.isArray(months)) return
+  const current = sel.value
+  sel.innerHTML = '<option value="">All months</option>'
+  months.forEach(m => {
+    const opt = document.createElement('option')
+    opt.value = m.month
+    opt.textContent = m.month  // YYYY-MM
+    sel.appendChild(opt)
+  })
+  if (current) sel.value = current
+}
+
 async function clearAllEvents() {
-  if (!confirm('Delete ALL events from the database? This cannot be undone.')) return
-  const res = await api('DELETE', '/api/events/all')
-  if (res.success) {
-    alert(`Cleared ${res.deleted} events. Ready for fresh CSV import.`)
+  const sel = $('clear-month-select')
+  const month = sel ? sel.value : ''
+  const label = month ? `events for ${month}` : 'ALL events'
+  if (!confirm(`Delete ${label} from the database? This cannot be undone.`)) return
+  const url = month ? `/api/events/clear?month=${month}` : '/api/events/clear'
+  const res = await api('DELETE', url)
+  if (res && res.success) {
+    alert(`Cleared ${res.deleted} event(s).`)
+    await populateClearMonthSelect()
     loadMonth(state.year, state.month)
   }
 }
@@ -476,6 +497,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const hash = location.hash.replace('#', '')
     if (['events', 'crew', 'quotes'].includes(hash)) switchTab(hash)
     loadMonth(state.year, state.month)
+    populateClearMonthSelect()
   } else {
     showLogin()
   }

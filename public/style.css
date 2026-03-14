@@ -355,7 +355,15 @@ code { font-family: 'JetBrains Mono', monospace; font-size: 12px; background: va
 }
 .month-nav { display: flex; align-items: center; gap: 6px; }
 .month-nav h2 { font-size: 18px; font-weight: 600; color: var(--txt); min-width: 180px; text-align: center; }
-.tab-bar-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.tab-bar-actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.clear-events-group { display: flex; gap: 0; align-items: center; }
+.clear-events-group .select-input {
+  border-radius: var(--r-sm) 0 0 var(--r-sm);
+  border-right: none;
+  height: 30px; padding: 0 8px;
+  font-size: 11px; min-width: 110px; max-width: 140px;
+}
+.clear-events-group .btn { border-radius: 0 var(--r-sm) var(--r-sm) 0; }
 .cal-legend { display: flex; gap: 20px; padding: 8px 20px 6px; }
 .legend-item { font-size: 11px; color: var(--txt-3); letter-spacing: 0.03em; }
 .legend-item--complete { color: var(--green); }
