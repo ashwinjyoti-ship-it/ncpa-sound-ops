@@ -49,7 +49,7 @@ export function setupEventsEndpoints(app: Hono<{ Bindings: Bindings }>) {
 
     const allowed = ['sound_requirements', 'call_time', 'venue', 'team', 'program',
                      'event_date', 'stage_crew_needed', 'needs_manual_review',
-                     'manual_flag_reason', 'requirements_updated', 'rider', 'notes']
+                     'manual_flag_reason', 'requirements_updated', 'rider', 'notes', 'crew']
     const fields: string[] = []
     const values: any[] = []
 
@@ -84,20 +84,22 @@ export function setupEventsEndpoints(app: Hono<{ Bindings: Bindings }>) {
     const { csv } = body
     if (!csv) return c.json({ error: 'csv field required' }, 400)
 
-    const lines = csv.trim().split('\n')
-    if (lines.length < 2) return c.json({ error: 'CSV must have header + data rows' }, 400)
+    // Parse full CSV with multi-line quoted cell support (RFC 4180)
+    const rows = parseCSVFull(csv.trim())
+    if (rows.length < 2) return c.json({ error: 'CSV must have header + data rows' }, 400)
 
-    const headers = parseCSVLine(lines[0]).map((h: string) => h.toLowerCase().trim().replace(/\s+/g, '_'))
+    const headers = rows[0].map((h: string) => h.toLowerCase().trim().replace(/\s+/g, '_'))
     const imported: string[] = []
     const skipped: string[] = []
     const errors: string[] = []
     // Generate a batch_id for this import so events appear in Crew Automation
     const batchId = `import_${Date.now()}`
 
-    for (let i = 1; i < lines.length; i++) {
-      if (!lines[i].trim()) continue
+    for (let i = 1; i < rows.length; i++) {
+      const rowArr = rows[i]
+      if (rowArr.every((v: string) => !v.trim())) continue
       try {
-        const values = parseCSVLine(lines[i])
+        const values = rowArr
         const row: Record<string, string> = {}
         headers.forEach((h: string, idx: number) => { row[h] = (values[idx] || '').trim() })
 
@@ -132,6 +134,7 @@ export function setupEventsEndpoints(app: Hono<{ Bindings: Bindings }>) {
         const team = row['team'] || ''
         const soundReq = row['sound_requirements'] || row['sound requirements'] || ''
         const callTime = row['call_time'] || row['call time'] || ''
+        const crew = row['crew'] || ''
 
         // Check for existing event; preserve rider + notes on re-import
         const existing = await DB.prepare(
@@ -140,9 +143,9 @@ export function setupEventsEndpoints(app: Hono<{ Bindings: Bindings }>) {
 
         if (existing) {
           await DB.prepare(
-            `UPDATE events SET venue=?, team=?, sound_requirements=?, call_time=?,
+            `UPDATE events SET venue=?, team=?, sound_requirements=?, call_time=?, crew=?,
              updated_at=CURRENT_TIMESTAMP WHERE id=?`
-          ).bind(venue, team, soundReq, callTime, existing.id).run()
+          ).bind(venue, team, soundReq, callTime, crew, existing.id).run()
           skipped.push(`Row ${i + 1}: updated existing (${eventDate} ${program})`)
         } else {
           const { mapped: venueNorm, isMultiVenue } = mapVenue(venue)
@@ -154,9 +157,9 @@ export function setupEventsEndpoints(app: Hono<{ Bindings: Bindings }>) {
             : (isMultiVenue ? 'Multi-venue event' : manualCheck.reason)
           const stageCrew = suspicious ? 1 : (needsManual ? 0 : (VENUE_DEFAULTS[venueNorm] || 1))
           await DB.prepare(
-            `INSERT INTO events (batch_id, event_date, program, venue, venue_normalized, team, vertical, sound_requirements, call_time, stage_crew_needed, needs_manual_review, manual_flag_reason)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-          ).bind(batchId, eventDate, program, venue, venueNorm, team, vertical, soundReq, callTime, stageCrew, needsManual, manualReason || null).run()
+            `INSERT INTO events (batch_id, event_date, program, venue, venue_normalized, team, vertical, sound_requirements, call_time, crew, stage_crew_needed, needs_manual_review, manual_flag_reason)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          ).bind(batchId, eventDate, program, venue, venueNorm, team, vertical, soundReq, callTime, crew, stageCrew, needsManual, manualReason || null).run()
           imported.push(`${eventDate} — ${program}`)
         }
       } catch (err: any) {
@@ -271,6 +274,35 @@ export function setupEventsEndpoints(app: Hono<{ Bindings: Bindings }>) {
       }
     })
   })
+}
+
+// Full RFC 4180 CSV parser — handles multi-line quoted cells
+function parseCSVFull(csv: string): string[][] {
+  const rows: string[][] = []
+  let row: string[] = []
+  let field = ''
+  let inQuotes = false
+  let i = 0
+
+  while (i < csv.length) {
+    const ch = csv[i]
+    if (inQuotes) {
+      if (ch === '"') {
+        if (csv[i + 1] === '"') { field += '"'; i += 2; continue } // escaped quote
+        inQuotes = false; i++; continue
+      }
+      field += ch; i++
+    } else {
+      if (ch === '"') { inQuotes = true; i++; continue }
+      if (ch === ',') { row.push(field.trim()); field = ''; i++; continue }
+      if (ch === '\r' && csv[i + 1] === '\n') { row.push(field.trim()); rows.push(row); row = []; field = ''; i += 2; continue }
+      if (ch === '\n') { row.push(field.trim()); rows.push(row); row = []; field = ''; i++; continue }
+      field += ch; i++
+    }
+  }
+  row.push(field.trim())
+  if (row.some(v => v)) rows.push(row)
+  return rows
 }
 
 // RFC 4180 compliant CSV line parser

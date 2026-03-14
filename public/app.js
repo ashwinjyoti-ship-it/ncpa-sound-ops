@@ -140,11 +140,11 @@ function renderCalendar() {
       const cls  = isComplete(e) ? 'cal-event--complete' : 'cal-event--pending'
       const vc   = venueCode(e.venue)
       const name = (e.program || '').replace(/</g, '&lt;')
-      const team = (e.team || '').replace(/</g, '&lt;')
+      const crewDisplay = (e.crew || '').replace(/</g, '&lt;')
       evHtml += `<div class="cal-event ${cls}" data-id="${e.id}" title="${name}">`
               + `<div class="cal-event-program">${name}</div>`
               + `<div class="cal-event-meta"><i class="fas fa-map-marker-alt"></i>${vc}</div>`
-              + (team ? `<div class="cal-event-meta"><i class="fas fa-users"></i>${team}</div>` : '')
+              + (crewDisplay ? `<div class="cal-event-meta"><i class="fas fa-users"></i>${crewDisplay}</div>` : '')
               + `</div>`
     }
     if (dayEvts.length > 3) {
@@ -217,6 +217,7 @@ function openEventModal(id) {
            + viewRow('Team (curator)', ev.team)
            + viewRow('Sound Requirements', ev.sound_requirements ? ev.sound_requirements.replace(/\n/g,'<br>') : '')
            + viewRow('Call Time', ev.call_time)
+           + viewRow('Crew (sound team)', ev.crew)
   if (ev.rider)  html += viewRow('Rider', ev.rider.replace(/\n/g,'<br>'))
   if (ev.notes)  html += viewRow('Notes', ev.notes.replace(/\n/g,'<br>'))
 
@@ -254,13 +255,23 @@ function openEditModal(id) {
   // team is a select — try to match option value
   const sel = $('edit-team')
   sel.value = ev.team || ''
-  if (!sel.value) sel.value = '' // fallback to blank if no match
+  if (!sel.value) sel.value = ''
   $('edit-sound').value    = ev.sound_requirements || ''
   $('edit-calltime').value = ev.call_time || ''
   $('edit-rider').value    = ev.rider || ''
   $('edit-notes').value    = ev.notes || ''
   $('modal-status').textContent = ''
   $('modal-status').className   = 'save-status'
+
+  // Populate crew checkboxes from comma-separated crew field
+  const crewNames = (ev.crew || '').split(',').map(s => s.trim()).filter(Boolean)
+  const knownCrew = new Set(crewNames)
+  document.querySelectorAll('.crew-cb').forEach(cb => {
+    cb.checked = knownCrew.has(cb.value)
+    knownCrew.delete(cb.value)
+  })
+  // Any crew not in the checkbox list go to custom field
+  $('edit-crew-custom').value = [...knownCrew].join(', ')
 
   $('event-modal').classList.add('hidden') // close view modal
   $('edit-modal').classList.remove('hidden')
@@ -284,17 +295,22 @@ async function saveEvent() {
   const notes   = $('edit-notes').value.trim() || null
   const st      = $('modal-status')
 
+  // Collect crew from checkboxes + custom input
+  const checkedCrew = [...document.querySelectorAll('.crew-cb:checked')].map(cb => cb.value)
+  const customCrew  = $('edit-crew-custom').value.split(',').map(s => s.trim()).filter(Boolean)
+  const crew = [...new Set([...checkedCrew, ...customCrew])].join(', ')
+
   st.textContent = 'Saving…'
   st.className   = 'save-status'
 
   const result = await PUT(`/api/events/${id}`, {
     program, event_date: date, venue, team,
-    sound_requirements: sound, call_time: call, rider, notes
+    sound_requirements: sound, call_time: call, rider, notes, crew
   })
 
   if (result?.success) {
     const ev = state.events.find(e => String(e.id) === String(id))
-    if (ev) { ev.program = program; ev.event_date = date; ev.venue = venue; ev.team = team; ev.sound_requirements = sound; ev.call_time = call; ev.rider = rider; ev.notes = notes }
+    if (ev) { ev.program = program; ev.event_date = date; ev.venue = venue; ev.team = team; ev.sound_requirements = sound; ev.call_time = call; ev.rider = rider; ev.notes = notes; ev.crew = crew }
     renderCalendar()
     st.textContent = '✓ Saved'
     st.className   = 'save-status save-status--ok'
