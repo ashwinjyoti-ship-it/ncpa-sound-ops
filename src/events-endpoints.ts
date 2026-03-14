@@ -136,9 +136,9 @@ export function setupEventsEndpoints(app: Hono<{ Bindings: Bindings }>) {
         const callTime = row['call_time'] || row['call time'] || ''
         const crew = row['crew'] || ''
 
-        // Check for existing event; preserve rider + notes on re-import
+        // Deduplicate check: TRIM + LOWER so whitespace/case variations don't create false misses
         const existing = await DB.prepare(
-          'SELECT id FROM events WHERE event_date = ? AND program = ? LIMIT 1'
+          'SELECT id FROM events WHERE event_date = ? AND LOWER(TRIM(program)) = LOWER(TRIM(?)) LIMIT 1'
         ).bind(eventDate, program).first() as any
 
         if (existing) {
@@ -174,6 +174,48 @@ export function setupEventsEndpoints(app: Hono<{ Bindings: Bindings }>) {
       errors: errors.length,
       details: { imported, skipped, errors }
     })
+  })
+
+  // Deduplicate events — keep the row with the most data for each date+program+venue
+  app.post('/api/events/deduplicate', async (c) => {
+    const { DB } = c.env
+    // Find duplicate groups (same date + TRIM+LOWER program + TRIM+LOWER venue)
+    const dupes = await DB.prepare(`
+      SELECT event_date, LOWER(TRIM(program)) as prog, LOWER(TRIM(venue)) as ven,
+             COUNT(*) as cnt, MAX(id) as keep_id
+      FROM events
+      GROUP BY event_date, LOWER(TRIM(program)), LOWER(TRIM(venue))
+      HAVING cnt > 1
+    `).all()
+
+    let deleted = 0
+    for (const d of (dupes.results as any[])) {
+      // Copy rider/notes/crew/sound_requirements from any sibling that has them to the kept row
+      await DB.prepare(`
+        UPDATE events SET
+          sound_requirements = COALESCE(NULLIF((SELECT sound_requirements FROM events WHERE id=? AND sound_requirements != ''), ''),
+            (SELECT sound_requirements FROM events WHERE event_date=? AND LOWER(TRIM(program))=? AND LOWER(TRIM(venue))=? AND sound_requirements != '' LIMIT 1)),
+          call_time = COALESCE(NULLIF((SELECT call_time FROM events WHERE id=? AND call_time != ''), ''),
+            (SELECT call_time FROM events WHERE event_date=? AND LOWER(TRIM(program))=? AND LOWER(TRIM(venue))=? AND call_time != '' LIMIT 1)),
+          crew = COALESCE(NULLIF((SELECT crew FROM events WHERE id=? AND crew != ''), ''),
+            (SELECT crew FROM events WHERE event_date=? AND LOWER(TRIM(program))=? AND LOWER(TRIM(venue))=? AND crew != '' LIMIT 1))
+        WHERE id=?
+      `).bind(
+        d.keep_id, d.event_date, d.prog, d.ven,
+        d.keep_id, d.event_date, d.prog, d.ven,
+        d.keep_id, d.event_date, d.prog, d.ven,
+        d.keep_id
+      ).run()
+
+      // Delete the duplicates (keep only max id)
+      const result = await DB.prepare(`
+        DELETE FROM events
+        WHERE event_date=? AND LOWER(TRIM(program))=? AND LOWER(TRIM(venue))=? AND id != ?
+      `).bind(d.event_date, d.prog, d.ven, d.keep_id).run()
+      deleted += result.meta.changes || 0
+    }
+
+    return c.json({ success: true, deleted, groups: dupes.results.length })
   })
 
   // Export events as CSV for a given month

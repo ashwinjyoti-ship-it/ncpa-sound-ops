@@ -372,6 +372,28 @@ async function runImport() {
   res.classList.remove('hidden')
 }
 
+async function runDeduplicate() {
+  const btn = $('dedup-run-btn')
+  const res  = $('import-result')
+  btn.disabled = true; btn.textContent = 'Working…'
+  res.className = 'import-result hidden'
+
+  const result = await POST('/api/events/deduplicate', {})
+  btn.disabled = false; btn.textContent = 'Remove Duplicates'
+
+  if (result?.success) {
+    res.textContent = result.deleted > 0
+      ? `✓ Removed ${result.deleted} duplicate rows (${result.groups} groups)`
+      : '✓ No duplicates found'
+    res.className = 'import-result import-result--ok'
+    if (result.deleted > 0) loadMonth(state.year, state.month)
+  } else {
+    res.textContent = result?.error || 'Deduplication failed'
+    res.className = 'import-result import-result--err'
+  }
+  res.classList.remove('hidden')
+}
+
 // ═══════════════════ EXPORT ═══════════════════
 function exportCSV() {
   const m = monthStr(state.year, state.month)
@@ -489,6 +511,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   on('export-ical-btn', 'click', exportICal)
   on('import-open-btn', 'click', openImportModal)
   on('import-run-btn',  'click', runImport)
+  on('dedup-run-btn',   'click', runDeduplicate)
   on('import-modal-close',   'click', closeImportModal)
   on('import-modal-backdrop','click', closeImportModal)
 
