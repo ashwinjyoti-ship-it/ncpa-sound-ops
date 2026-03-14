@@ -1031,6 +1031,7 @@ async function loadWorkload(year, month) {
 async function initCrewTab() {
   if (!crew2.allCrew.length) await loadCrewRoster()
   await loadBatches()
+  switchCrewSub('assignments')
 }
 
 // Patch the tab switch to init crew tab on first visit
