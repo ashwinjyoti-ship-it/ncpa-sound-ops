@@ -137,12 +137,15 @@ function renderCalendar() {
     let evHtml = ''
     const visible = dayEvts.slice(0, 3)
     for (const e of visible) {
-      const cls = isComplete(e) ? 'cal-event--complete' : 'cal-event--pending'
-      const vc  = venueCode(e.venue)
+      const cls  = isComplete(e) ? 'cal-event--complete' : 'cal-event--pending'
+      const vc   = venueCode(e.venue)
       const name = (e.program || '').replace(/</g, '&lt;')
+      const crewDisplay = (e.crew || '').replace(/</g, '&lt;')
       evHtml += `<div class="cal-event ${cls}" data-id="${e.id}" title="${name}">`
-               + `<span class="cal-event-venue">${vc}</span>`
-               + `<span class="cal-event-name">${name}</span></div>`
+              + `<div class="cal-event-program">${name}</div>`
+              + `<div class="cal-event-meta"><i class="fas fa-map-marker-alt"></i>${vc}</div>`
+              + (crewDisplay ? `<div class="cal-event-meta"><i class="fas fa-users"></i>${crewDisplay}</div>` : '')
+              + `</div>`
     }
     if (dayEvts.length > 3) {
       evHtml += `<div class="cal-event-more">+${dayEvts.length - 3} more</div>`
@@ -189,23 +192,50 @@ async function loadMonth(year, month) {
   renderCalendar()
 }
 
-// ═══════════════════ EVENT EDIT MODAL ═══════════════════
+// ═══════════════════ EVENT VIEW MODAL (read-only) ═══════════════════
+function fmtDate(d) {
+  if (!d) return '—'
+  const [y, m, day] = d.split('-')
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+  return `${parseInt(day)} ${months[parseInt(m)-1]} ${y}`
+}
+
+function viewRow(label, value, empty) {
+  const val = value ? `<div class="event-view-value">${value}</div>`
+                    : `<div class="event-view-value event-view-value--empty">${empty || 'Not specified'}</div>`
+  return `<div class="event-view-row"><div class="event-view-label">${label}</div>${val}</div>`
+}
+
 function openEventModal(id) {
   const ev = state.events.find(e => String(e.id) === String(id))
   if (!ev) return
   state.currentEventId = id
 
-  $('modal-program').textContent = ev.program || '—'
-  $('modal-meta').textContent    = `${ev.event_date} · ${ev.venue || ''}${ev.team ? ' · ' + ev.team : ''}`
-  $('edit-sound').value          = ev.sound_requirements || ''
-  $('edit-calltime').value       = ev.call_time || ''
-  $('edit-rider').value          = ev.rider || ''
-  $('edit-notes').value          = ev.notes || ''
-  $('modal-status').textContent  = ''
-  $('modal-status').className    = 'save-status'
+  let html = viewRow('Date', fmtDate(ev.event_date))
+           + viewRow('Program / Event', ev.program)
+           + viewRow('Venue', ev.venue)
+           + viewRow('Team (curator)', ev.team)
+           + viewRow('Sound Requirements', ev.sound_requirements ? ev.sound_requirements.replace(/\n/g,'<br>') : '')
+           + viewRow('Call Time', ev.call_time)
+           + viewRow('Crew (sound team)', ev.crew)
+  if (ev.rider)  html += viewRow('Rider', ev.rider.replace(/\n/g,'<br>'))
+  if (ev.notes)  html += viewRow('Notes', ev.notes.replace(/\n/g,'<br>'))
 
+  $('event-view-body').innerHTML = html
   $('event-modal').classList.remove('hidden')
-  $('edit-sound').focus()
+
+  // Fetch assigned crew and append
+  GET(`/api/events/${id}/assignments`).then(crew => {
+    if (!Array.isArray(crew) || !crew.length) return
+    const foh   = crew.filter(c => c.role === 'FOH').map(c => c.name).join(', ')
+    const stage = crew.filter(c => c.role === 'Stage').map(c => c.name).join(', ')
+    let crewHtml = ''
+    if (foh)   crewHtml += `<span class="crew-badge crew-badge--foh">FOH: ${foh}</span> `
+    if (stage) crewHtml += `<span class="crew-badge">Stage: ${stage}</span>`
+    if (crewHtml) {
+      $('event-view-body').innerHTML += viewRow('Assigned Crew', crewHtml)
+    }
+  }).catch(() => {})
 }
 
 function closeEventModal() {
@@ -213,46 +243,105 @@ function closeEventModal() {
   state.currentEventId = null
 }
 
+// ═══════════════════ EVENT EDIT MODAL ═══════════════════
+function openEditModal(id) {
+  const ev = state.events.find(e => String(e.id) === String(id || state.currentEventId))
+  if (!ev) return
+  state.currentEventId = String(ev.id)
+
+  $('edit-program').value  = ev.program || ''
+  $('edit-date').value     = ev.event_date || ''
+  $('edit-venue').value    = ev.venue || ''
+  // team is a select — try to match option value
+  const sel = $('edit-team')
+  sel.value = ev.team || ''
+  if (!sel.value) sel.value = ''
+  $('edit-sound').value    = ev.sound_requirements || ''
+  $('edit-calltime').value = ev.call_time || ''
+  $('edit-rider').value    = ev.rider || ''
+  $('edit-notes').value    = ev.notes || ''
+  $('modal-status').textContent = ''
+  $('modal-status').className   = 'save-status'
+
+  // Populate crew checkboxes from comma-separated crew field
+  const crewNames = (ev.crew || '').split(',').map(s => s.trim()).filter(Boolean)
+  const knownCrew = new Set(crewNames)
+  document.querySelectorAll('.crew-cb').forEach(cb => {
+    cb.checked = knownCrew.has(cb.value)
+    knownCrew.delete(cb.value)
+  })
+  // Any crew not in the checkbox list go to custom field
+  $('edit-crew-custom').value = [...knownCrew].join(', ')
+
+  $('event-modal').classList.add('hidden') // close view modal
+  $('edit-modal').classList.remove('hidden')
+  $('edit-program').focus()
+}
+
+function closeEditModal() {
+  $('edit-modal').classList.add('hidden')
+}
+
 async function saveEvent() {
   const id = state.currentEventId
   if (!id) return
-  const sound = $('edit-sound').value.trim()
-  const call  = $('edit-calltime').value.trim()
-  const rider = $('edit-rider').value.trim() || null
-  const notes = $('edit-notes').value.trim() || null
-  const st    = $('modal-status')
+  const program = $('edit-program').value.trim()
+  const date    = $('edit-date').value.trim()
+  const venue   = $('edit-venue').value.trim()
+  const team    = $('edit-team').value
+  const sound   = $('edit-sound').value.trim()
+  const call    = $('edit-calltime').value.trim()
+  const rider   = $('edit-rider').value.trim() || null
+  const notes   = $('edit-notes').value.trim() || null
+  const st      = $('modal-status')
+
+  // Collect crew from checkboxes + custom input
+  const checkedCrew = [...document.querySelectorAll('.crew-cb:checked')].map(cb => cb.value)
+  const customCrew  = $('edit-crew-custom').value.split(',').map(s => s.trim()).filter(Boolean)
+  const crew = [...new Set([...checkedCrew, ...customCrew])].join(', ')
 
   st.textContent = 'Saving…'
   st.className   = 'save-status'
 
   const result = await PUT(`/api/events/${id}`, {
-    sound_requirements: sound,
-    call_time: call,
-    rider,
-    notes
+    program, event_date: date, venue, team,
+    sound_requirements: sound, call_time: call, rider, notes, crew
   })
 
   if (result?.success) {
-    // Update local state
     const ev = state.events.find(e => String(e.id) === String(id))
-    if (ev) { ev.sound_requirements = sound; ev.call_time = call; ev.rider = rider; ev.notes = notes }
+    if (ev) { ev.program = program; ev.event_date = date; ev.venue = venue; ev.team = team; ev.sound_requirements = sound; ev.call_time = call; ev.rider = rider; ev.notes = notes; ev.crew = crew }
     renderCalendar()
     st.textContent = '✓ Saved'
     st.className   = 'save-status save-status--ok'
-    setTimeout(closeEventModal, 800)
+    setTimeout(closeEditModal, 800)
   } else {
     st.textContent = result?.error || 'Save failed'
     st.className   = 'save-status save-status--err'
   }
 }
 
+async function deleteEvent() {
+  const id = state.currentEventId
+  if (!id) return
+  if (!confirm('Delete this event? This cannot be undone.')) return
+  const result = await DEL(`/api/events/${id}`)
+  if (result?.success !== false) {
+    state.events = state.events.filter(e => String(e.id) !== String(id))
+    renderCalendar()
+    closeEventModal()
+    closeEditModal()
+  }
+}
+
 // ═══════════════════ CSV IMPORT MODAL ═══════════════════
 function openImportModal() {
   $('import-csv-input').value = ''
+  $('import-file-input').value = ''
+  $('import-file-name').textContent = 'No file chosen'
   $('import-result').className = 'import-result hidden'
   $('import-result').textContent = ''
   $('import-modal').classList.remove('hidden')
-  $('import-csv-input').focus()
 }
 function closeImportModal() { $('import-modal').classList.add('hidden') }
 
@@ -260,24 +349,49 @@ async function runImport() {
   const csv = $('import-csv-input').value.trim()
   if (!csv) return
 
-  const btn = $('import-run-btn')
-  btn.disabled = true; btn.textContent = 'Importing…'
+  const overwrite = $('import-overwrite').checked
+  if (overwrite && !confirm('This will DELETE all existing events for the month(s) in this CSV, then reimport cleanly. Continue?')) return
 
-  const result = await POST('/api/events/import/csv', { csv })
+  const btn = $('import-run-btn')
+  btn.disabled = true; btn.textContent = overwrite ? 'Clearing & importing…' : 'Importing…'
+
+  const result = await POST('/api/events/import/csv', { csv, overwrite })
   btn.disabled = false; btn.textContent = 'Import'
 
   const res = $('import-result')
   if (result?.success !== undefined) {
     const { imported, skipped, errors } = result
-    let msg = `Imported: ${imported}`
-    if (skipped > 0) msg += ` · Skipped: ${skipped}`
-    if (errors > 0)  msg += ` · Errors: ${errors}`
-    if (result.details?.errors?.length) msg += '\n' + result.details.errors.join('\n')
+    let msg = overwrite ? `Cleared month & imported ${imported}` : `Imported: ${imported}`
+    if (!overwrite && skipped > 0) msg += ` · Updated: ${skipped}`
+    if (errors > 0) msg += ` · Errors: ${errors}`
+    if (result.details?.errors?.length) msg += '\n' + result.details.errors.slice(0, 10).join('\n')
     res.textContent = msg
     res.className = errors > 0 ? 'import-result import-result--err' : 'import-result import-result--ok'
-    if (imported > 0) loadMonth(state.year, state.month)  // refresh
+    loadMonth(state.year, state.month)
   } else {
     res.textContent = result?.error || 'Import failed'
+    res.className = 'import-result import-result--err'
+  }
+  res.classList.remove('hidden')
+}
+
+async function runDeduplicate() {
+  const btn = $('dedup-run-btn')
+  const res  = $('import-result')
+  btn.disabled = true; btn.textContent = 'Working…'
+  res.className = 'import-result hidden'
+
+  const result = await POST('/api/events/deduplicate', {})
+  btn.disabled = false; btn.textContent = 'Remove Duplicates'
+
+  if (result?.success) {
+    res.textContent = result.deleted > 0
+      ? `✓ Removed ${result.deleted} duplicate rows (${result.groups} groups)`
+      : '✓ No duplicates found'
+    res.className = 'import-result import-result--ok'
+    if (result.deleted > 0) loadMonth(state.year, state.month)
+  } else {
+    res.textContent = result?.error || 'Deduplication failed'
     res.className = 'import-result import-result--err'
   }
   res.classList.remove('hidden')
@@ -400,12 +514,34 @@ document.addEventListener('DOMContentLoaded', async () => {
   on('export-ical-btn', 'click', exportICal)
   on('import-open-btn', 'click', openImportModal)
   on('import-run-btn',  'click', runImport)
+  on('dedup-run-btn',   'click', runDeduplicate)
   on('import-modal-close',   'click', closeImportModal)
   on('import-modal-backdrop','click', closeImportModal)
 
-  // ── Event modal ──
+  // ── File pickers ──
+  on('import-file-btn', 'click', () => $('import-file-input').click())
+  $('import-file-input').addEventListener('change', e => {
+    const file = e.target.files[0]; if (!file) return
+    $('import-file-name').textContent = file.name
+    const r = new FileReader(); r.onload = ev => { $('import-csv-input').value = ev.target.result }; r.readAsText(file)
+  })
+  on('upload-file-btn', 'click', () => $('upload-file-input').click())
+  $('upload-file-input').addEventListener('change', e => {
+    const file = e.target.files[0]; if (!file) return
+    $('upload-file-name').textContent = file.name
+    const r = new FileReader(); r.onload = ev => { $('upload-csv-input').value = ev.target.result }; r.readAsText(file)
+  })
+
+  // ── Event view modal ──
   on('event-modal-close',    'click', closeEventModal)
   on('event-modal-backdrop', 'click', closeEventModal)
+  on('modal-delete-btn',     'click', deleteEvent)
+  on('modal-edit-btn',       'click', () => openEditModal())
+
+  // ── Event edit modal ──
+  on('edit-modal-close',     'click', closeEditModal)
+  on('edit-modal-backdrop',  'click', closeEditModal)
+  on('edit-modal-cancel',    'click', closeEditModal)
   on('modal-save-btn',       'click', saveEvent)
   on('edit-sound', 'keydown', e => { if (e.ctrlKey && e.key === 'Enter') saveEvent() })
 
@@ -419,8 +555,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   // ── Keyboard: Esc closes modals ──
   document.addEventListener('keydown', e => {
     if (e.key !== 'Escape') return
-    if (!$('event-modal').classList.contains('hidden'))    closeEventModal()
-    else if (!$('import-modal').classList.contains('hidden'))   closeImportModal()
+    if (!$('edit-modal').classList.contains('hidden'))         closeEditModal()
+    else if (!$('event-modal').classList.contains('hidden'))   closeEventModal()
+    else if (!$('import-modal').classList.contains('hidden'))  closeImportModal()
     else if (!$('settings-modal').classList.contains('hidden')) closeSettingsModal()
   })
 })
@@ -695,9 +832,10 @@ async function saveOverride() {
 // ── Upload batch ──
 function openUploadModal() {
   $('upload-csv-input').value = ''
+  $('upload-file-input').value = ''
+  $('upload-file-name').textContent = 'No file chosen'
   $('upload-result').classList.add('hidden')
   $('upload-modal').classList.remove('hidden')
-  $('upload-csv-input').focus()
 }
 function closeUploadModal() { $('upload-modal').classList.add('hidden') }
 
@@ -961,10 +1099,6 @@ const q3 = {
   lines: [],        // [{id,name,category,rate,qty,days}]
   editingEqId: null // null = new, number = editing
 }
-
-const DEL_BODY = (path, body) =>
-  fetch(path, { method: 'DELETE', credentials: 'include',
-    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(r => r.json())
 
 // ── Format rupees ──
 const rupees = n => '₹' + Math.round(n).toLocaleString('en-IN')

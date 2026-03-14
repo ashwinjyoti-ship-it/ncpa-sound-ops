@@ -76,7 +76,7 @@ export function mapTeamToVertical(team: string): string {
   return 'Others'
 }
 
-function isManualOnlyVenue(venueRaw: string): { manual: boolean, reason: string } {
+export function isManualOnlyVenue(venueRaw: string): { manual: boolean, reason: string } {
   const lower = venueRaw.toLowerCase()
   if (lower.includes('dpag') || lower.includes('piramal') || lower.includes('gallery')) {
     return { manual: true, reason: 'DPAG venue' }
@@ -87,7 +87,7 @@ function isManualOnlyVenue(venueRaw: string): { manual: boolean, reason: string 
   return { manual: false, reason: '' }
 }
 
-function isSuspiciousVenue(venue: string): boolean {
+export function isSuspiciousVenue(venue: string): boolean {
   const trimmed = venue.trim()
   const upper = trimmed.toUpperCase()
   const lower = trimmed.toLowerCase()
@@ -602,6 +602,16 @@ export function setupCrewEndpoints(app: Hono<{ Bindings: Bindings }>) {
     )
 
     return c.json({ assignments, conflicts })
+  })
+
+  // Get crew assignments for a single event
+  app.get('/api/events/:id/assignments', async (c) => {
+    const { DB } = c.env
+    const eventId = c.req.param('id')
+    const results = await DB.prepare(
+      `SELECT a.role, cr.name, cr.level FROM assignments a JOIN crew cr ON cr.id = a.crew_id WHERE a.event_id = ?`
+    ).bind(eventId).all()
+    return c.json(results.results || [])
   })
 
   // Get assignments for a batch

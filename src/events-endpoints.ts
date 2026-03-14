@@ -1,5 +1,6 @@
 import { Hono } from 'hono'
 import type { Bindings } from './types'
+import { mapVenue, mapTeamToVertical, VENUE_DEFAULTS, isManualOnlyVenue, isSuspiciousVenue } from './crew-endpoints'
 
 export function setupEventsEndpoints(app: Hono<{ Bindings: Bindings }>) {
 
@@ -48,7 +49,7 @@ export function setupEventsEndpoints(app: Hono<{ Bindings: Bindings }>) {
 
     const allowed = ['sound_requirements', 'call_time', 'venue', 'team', 'program',
                      'event_date', 'stage_crew_needed', 'needs_manual_review',
-                     'manual_flag_reason', 'requirements_updated', 'rider', 'notes']
+                     'manual_flag_reason', 'requirements_updated', 'rider', 'notes', 'crew']
     const fields: string[] = []
     const values: any[] = []
 
@@ -80,21 +81,49 @@ export function setupEventsEndpoints(app: Hono<{ Bindings: Bindings }>) {
   app.post('/api/events/import/csv', async (c) => {
     const { DB } = c.env
     const body = await c.req.json()
-    const { csv } = body
+    const { csv, overwrite } = body
     if (!csv) return c.json({ error: 'csv field required' }, 400)
 
-    const lines = csv.trim().split('\n')
-    if (lines.length < 2) return c.json({ error: 'CSV must have header + data rows' }, 400)
+    // Parse full CSV with multi-line quoted cell support (RFC 4180)
+    const rows = parseCSVFull(csv.trim())
+    if (rows.length < 2) return c.json({ error: 'CSV must have header + data rows' }, 400)
 
-    const headers = parseCSVLine(lines[0]).map((h: string) => h.toLowerCase().trim().replace(/\s+/g, '_'))
+    const headers = rows[0].map((h: string) => h.toLowerCase().trim().replace(/\s+/g, '_'))
+
+    // If overwrite=true, detect months present in the CSV and delete all existing events for those months
+    if (overwrite) {
+      const monthsInCSV = new Set<string>()
+      const dateIdx = headers.indexOf('date') !== -1 ? headers.indexOf('date') : headers.indexOf('event_date')
+      if (dateIdx !== -1) {
+        for (let i = 1; i < rows.length; i++) {
+          const raw = (rows[i][dateIdx] || '').trim()
+          const m = raw.match(/^(\d{4}-\d{2})/) || raw.match(/^\d{1,2}[-/]\d{1,2}[-/](\d{4})$/)
+          if (m) {
+            if (raw.match(/^\d{4}-\d{2}/)) {
+              monthsInCSV.add(raw.substring(0, 7))
+            } else {
+              const sep = raw.includes('/') ? '/' : '-'
+              const parts = raw.split(sep)
+              if (parts.length === 3) monthsInCSV.add(`${parts[2]}-${parts[1].padStart(2,'0')}`)
+            }
+          }
+        }
+      }
+      for (const month of monthsInCSV) {
+        await DB.prepare('DELETE FROM events WHERE event_date LIKE ?').bind(`${month}%`).run()
+      }
+    }
     const imported: string[] = []
     const skipped: string[] = []
     const errors: string[] = []
+    // Generate a batch_id for this import so events appear in Crew Automation
+    const batchId = `import_${Date.now()}`
 
-    for (let i = 1; i < lines.length; i++) {
-      if (!lines[i].trim()) continue
+    for (let i = 1; i < rows.length; i++) {
+      const rowArr = rows[i]
+      if (rowArr.every((v: string) => !v.trim())) continue
       try {
-        const values = parseCSVLine(lines[i])
+        const values = rowArr
         const row: Record<string, string> = {}
         headers.forEach((h: string, idx: number) => { row[h] = (values[idx] || '').trim() })
 
@@ -126,27 +155,36 @@ export function setupEventsEndpoints(app: Hono<{ Bindings: Bindings }>) {
           continue
         }
 
-        // UPSERT: update base fields but preserve rider + notes if already set
-        const result = await DB.prepare(
-          `INSERT INTO events (event_date, program, venue, team, sound_requirements, call_time)
-           VALUES (?, ?, ?, ?, ?, ?)
-           ON CONFLICT(event_date, program) DO UPDATE SET
-             venue              = excluded.venue,
-             team               = excluded.team,
-             sound_requirements = excluded.sound_requirements,
-             call_time          = excluded.call_time,
-             updated_at         = CURRENT_TIMESTAMP`
-        ).bind(
-          eventDate, program, venue,
-          row['team'] || '',
-          row['sound_requirements'] || row['sound requirements'] || '',
-          row['call_time'] || row['call time'] || ''
-        ).run()
+        const team = row['team'] || ''
+        const soundReq = row['sound_requirements'] || row['sound requirements'] || ''
+        const callTime = row['call_time'] || row['call time'] || ''
+        const crew = row['crew'] || ''
 
-        if ((result.meta.changes || 0) > 0) {
-          imported.push(`${eventDate} — ${program}`)
+        // Deduplicate check: TRIM + LOWER so whitespace/case variations don't create false misses
+        const existing = await DB.prepare(
+          'SELECT id FROM events WHERE event_date = ? AND LOWER(TRIM(program)) = LOWER(TRIM(?)) LIMIT 1'
+        ).bind(eventDate, program).first() as any
+
+        if (existing) {
+          await DB.prepare(
+            `UPDATE events SET venue=?, team=?, sound_requirements=?, call_time=?, crew=?,
+             updated_at=CURRENT_TIMESTAMP WHERE id=?`
+          ).bind(venue, team, soundReq, callTime, crew, existing.id).run()
+          skipped.push(`Row ${i + 1}: updated existing (${eventDate} ${program})`)
         } else {
-          skipped.push(`Row ${i + 1}: no change (${eventDate} ${program})`)
+          const { mapped: venueNorm, isMultiVenue } = mapVenue(venue)
+          const vertical = mapTeamToVertical(team)
+          const manualCheck = isManualOnlyVenue(venue)
+          const suspicious = isSuspiciousVenue(venue)
+          const needsManual = manualCheck.manual || isMultiVenue || suspicious ? 1 : 0
+          const manualReason = suspicious ? (manualCheck.reason ? manualCheck.reason + '; Suspicious venue' : 'Suspicious venue')
+            : (isMultiVenue ? 'Multi-venue event' : manualCheck.reason)
+          const stageCrew = suspicious ? 1 : (needsManual ? 0 : (VENUE_DEFAULTS[venueNorm] || 1))
+          await DB.prepare(
+            `INSERT INTO events (batch_id, event_date, program, venue, venue_normalized, team, vertical, sound_requirements, call_time, crew, stage_crew_needed, needs_manual_review, manual_flag_reason)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          ).bind(batchId, eventDate, program, venue, venueNorm, team, vertical, soundReq, callTime, crew, stageCrew, needsManual, manualReason || null).run()
+          imported.push(`${eventDate} — ${program}`)
         }
       } catch (err: any) {
         errors.push(`Row ${i + 1}: ${err.message}`)
@@ -160,6 +198,48 @@ export function setupEventsEndpoints(app: Hono<{ Bindings: Bindings }>) {
       errors: errors.length,
       details: { imported, skipped, errors }
     })
+  })
+
+  // Deduplicate events — keep the row with the most data for each date+program+venue
+  app.post('/api/events/deduplicate', async (c) => {
+    const { DB } = c.env
+    // Find duplicate groups (same date + TRIM+LOWER program + TRIM+LOWER venue)
+    const dupes = await DB.prepare(`
+      SELECT event_date, LOWER(TRIM(program)) as prog, LOWER(TRIM(venue)) as ven,
+             COUNT(*) as cnt, MAX(id) as keep_id
+      FROM events
+      GROUP BY event_date, LOWER(TRIM(program)), LOWER(TRIM(venue))
+      HAVING cnt > 1
+    `).all()
+
+    let deleted = 0
+    for (const d of (dupes.results as any[])) {
+      // Copy rider/notes/crew/sound_requirements from any sibling that has them to the kept row
+      await DB.prepare(`
+        UPDATE events SET
+          sound_requirements = COALESCE(NULLIF((SELECT sound_requirements FROM events WHERE id=? AND sound_requirements != ''), ''),
+            (SELECT sound_requirements FROM events WHERE event_date=? AND LOWER(TRIM(program))=? AND LOWER(TRIM(venue))=? AND sound_requirements != '' LIMIT 1)),
+          call_time = COALESCE(NULLIF((SELECT call_time FROM events WHERE id=? AND call_time != ''), ''),
+            (SELECT call_time FROM events WHERE event_date=? AND LOWER(TRIM(program))=? AND LOWER(TRIM(venue))=? AND call_time != '' LIMIT 1)),
+          crew = COALESCE(NULLIF((SELECT crew FROM events WHERE id=? AND crew != ''), ''),
+            (SELECT crew FROM events WHERE event_date=? AND LOWER(TRIM(program))=? AND LOWER(TRIM(venue))=? AND crew != '' LIMIT 1))
+        WHERE id=?
+      `).bind(
+        d.keep_id, d.event_date, d.prog, d.ven,
+        d.keep_id, d.event_date, d.prog, d.ven,
+        d.keep_id, d.event_date, d.prog, d.ven,
+        d.keep_id
+      ).run()
+
+      // Delete the duplicates (keep only max id)
+      const result = await DB.prepare(`
+        DELETE FROM events
+        WHERE event_date=? AND LOWER(TRIM(program))=? AND LOWER(TRIM(venue))=? AND id != ?
+      `).bind(d.event_date, d.prog, d.ven, d.keep_id).run()
+      deleted += result.meta.changes || 0
+    }
+
+    return c.json({ success: true, deleted, groups: dupes.results.length })
   })
 
   // Export events as CSV for a given month
@@ -260,6 +340,35 @@ export function setupEventsEndpoints(app: Hono<{ Bindings: Bindings }>) {
       }
     })
   })
+}
+
+// Full RFC 4180 CSV parser — handles multi-line quoted cells
+function parseCSVFull(csv: string): string[][] {
+  const rows: string[][] = []
+  let row: string[] = []
+  let field = ''
+  let inQuotes = false
+  let i = 0
+
+  while (i < csv.length) {
+    const ch = csv[i]
+    if (inQuotes) {
+      if (ch === '"') {
+        if (csv[i + 1] === '"') { field += '"'; i += 2; continue } // escaped quote
+        inQuotes = false; i++; continue
+      }
+      field += ch; i++
+    } else {
+      if (ch === '"') { inQuotes = true; i++; continue }
+      if (ch === ',') { row.push(field.trim()); field = ''; i++; continue }
+      if (ch === '\r' && csv[i + 1] === '\n') { row.push(field.trim()); rows.push(row); row = []; field = ''; i += 2; continue }
+      if (ch === '\n') { row.push(field.trim()); rows.push(row); row = []; field = ''; i++; continue }
+      field += ch; i++
+    }
+  }
+  row.push(field.trim())
+  if (row.some(v => v)) rows.push(row)
+  return rows
 }
 
 // RFC 4180 compliant CSV line parser

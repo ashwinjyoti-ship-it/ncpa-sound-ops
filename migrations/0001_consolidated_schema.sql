@@ -91,7 +91,6 @@ CREATE TABLE IF NOT EXISTS app_settings (
 );
 
 -- INDEXES
-CREATE UNIQUE INDEX IF NOT EXISTS idx_events_date_program ON events(event_date, program);
 CREATE INDEX IF NOT EXISTS idx_events_date ON events(event_date);
 CREATE INDEX IF NOT EXISTS idx_events_program ON events(program);
 CREATE INDEX IF NOT EXISTS idx_events_venue ON events(venue);
