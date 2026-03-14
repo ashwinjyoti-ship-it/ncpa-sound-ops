@@ -349,22 +349,25 @@ async function runImport() {
   const csv = $('import-csv-input').value.trim()
   if (!csv) return
 
-  const btn = $('import-run-btn')
-  btn.disabled = true; btn.textContent = 'Importing…'
+  const overwrite = $('import-overwrite').checked
+  if (overwrite && !confirm('This will DELETE all existing events for the month(s) in this CSV, then reimport cleanly. Continue?')) return
 
-  const result = await POST('/api/events/import/csv', { csv })
+  const btn = $('import-run-btn')
+  btn.disabled = true; btn.textContent = overwrite ? 'Clearing & importing…' : 'Importing…'
+
+  const result = await POST('/api/events/import/csv', { csv, overwrite })
   btn.disabled = false; btn.textContent = 'Import'
 
   const res = $('import-result')
   if (result?.success !== undefined) {
     const { imported, skipped, errors } = result
-    let msg = `Imported: ${imported}`
-    if (skipped > 0) msg += ` · Skipped: ${skipped}`
-    if (errors > 0)  msg += ` · Errors: ${errors}`
-    if (result.details?.errors?.length) msg += '\n' + result.details.errors.join('\n')
+    let msg = overwrite ? `Cleared month & imported ${imported}` : `Imported: ${imported}`
+    if (!overwrite && skipped > 0) msg += ` · Updated: ${skipped}`
+    if (errors > 0) msg += ` · Errors: ${errors}`
+    if (result.details?.errors?.length) msg += '\n' + result.details.errors.slice(0, 10).join('\n')
     res.textContent = msg
     res.className = errors > 0 ? 'import-result import-result--err' : 'import-result import-result--ok'
-    if (imported > 0) loadMonth(state.year, state.month)  // refresh
+    loadMonth(state.year, state.month)
   } else {
     res.textContent = result?.error || 'Import failed'
     res.className = 'import-result import-result--err'

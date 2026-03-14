@@ -81,7 +81,7 @@ export function setupEventsEndpoints(app: Hono<{ Bindings: Bindings }>) {
   app.post('/api/events/import/csv', async (c) => {
     const { DB } = c.env
     const body = await c.req.json()
-    const { csv } = body
+    const { csv, overwrite } = body
     if (!csv) return c.json({ error: 'csv field required' }, 400)
 
     // Parse full CSV with multi-line quoted cell support (RFC 4180)
@@ -89,6 +89,30 @@ export function setupEventsEndpoints(app: Hono<{ Bindings: Bindings }>) {
     if (rows.length < 2) return c.json({ error: 'CSV must have header + data rows' }, 400)
 
     const headers = rows[0].map((h: string) => h.toLowerCase().trim().replace(/\s+/g, '_'))
+
+    // If overwrite=true, detect months present in the CSV and delete all existing events for those months
+    if (overwrite) {
+      const monthsInCSV = new Set<string>()
+      const dateIdx = headers.indexOf('date') !== -1 ? headers.indexOf('date') : headers.indexOf('event_date')
+      if (dateIdx !== -1) {
+        for (let i = 1; i < rows.length; i++) {
+          const raw = (rows[i][dateIdx] || '').trim()
+          const m = raw.match(/^(\d{4}-\d{2})/) || raw.match(/^\d{1,2}[-/]\d{1,2}[-/](\d{4})$/)
+          if (m) {
+            if (raw.match(/^\d{4}-\d{2}/)) {
+              monthsInCSV.add(raw.substring(0, 7))
+            } else {
+              const sep = raw.includes('/') ? '/' : '-'
+              const parts = raw.split(sep)
+              if (parts.length === 3) monthsInCSV.add(`${parts[2]}-${parts[1].padStart(2,'0')}`)
+            }
+          }
+        }
+      }
+      for (const month of monthsInCSV) {
+        await DB.prepare('DELETE FROM events WHERE event_date LIKE ?').bind(`${month}%`).run()
+      }
+    }
     const imported: string[] = []
     const skipped: string[] = []
     const errors: string[] = []

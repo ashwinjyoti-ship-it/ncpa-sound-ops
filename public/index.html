@@ -413,10 +413,13 @@
         <textarea id="import-csv-input" rows="8" class="mono" placeholder="Date,Program,Venue,Team,Sound Requirements,Call Time&#10;12-03-2025,Concert Name,Tata Theatre,Dr.Rao/Team,2 cordless mics,2:00pm"></textarea>
       </div>
     </div>
-    <div class="modal-footer">
-      <button class="btn btn-ghost btn-sm" id="dedup-run-btn" title="Remove duplicate events from the database">Remove Duplicates</button>
-      <div id="import-result" class="import-result hidden"></div>
-      <button class="btn btn-primary" id="import-run-btn">Import</button>
+    <div class="modal-footer" style="flex-wrap:wrap;gap:8px">
+      <label id="import-overwrite-label" style="display:flex;align-items:flex-start;gap:6px;font-size:12px;color:var(--txt-2);cursor:pointer;flex:1;min-width:180px">
+        <input type="checkbox" id="import-overwrite" style="margin-top:2px;accent-color:var(--red)">
+        <span><strong style="color:var(--red)">Clear month first</strong> — deletes all events for the CSV's month before importing (use to fix corrupted/duplicate data)</span>
+      </label>
+      <div id="import-result" class="import-result hidden" style="width:100%;order:10"></div>
+      <button class="btn btn-primary" id="import-run-btn" style="order:9">Import</button>
     </div>
   </div>
 </div>
