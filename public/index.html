@@ -6,7 +6,7 @@
   <title>NCPA Sound Ops</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;900&family=JetBrains+Mono:wght@400;500;700&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/style.css">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 </head>
@@ -33,12 +33,14 @@
 <!-- MAIN APP -->
 <div id="app" class="hidden">
 
-  <nav class="top-nav">
+  <nav class="top-nav te-panel">
     <div class="nav-brand">NCPA <span>Sound Ops</span></div>
-    <div class="nav-tabs">
-      <button class="nav-tab active" data-tab="events">Events</button>
-      <button class="nav-tab" data-tab="crew">Crew Assignment</button>
-      <button class="nav-tab" data-tab="quotes">Quote Builder</button>
+    <div class="nav-module">
+      <div class="nav-tabs">
+        <button class="nav-tab active" data-tab="events">EVT</button>
+        <button class="nav-tab" data-tab="crew">CREW</button>
+        <button class="nav-tab" data-tab="quotes">QTE</button>
+      </div>
     </div>
     <div class="nav-actions">
       <button id="settings-btn" class="btn btn-ghost btn-icon" title="Settings">&#9881;</button>
