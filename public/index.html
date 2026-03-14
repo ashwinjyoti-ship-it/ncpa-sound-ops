@@ -269,20 +269,38 @@
   <div class="modal-card">
     <div class="modal-header">
       <div class="modal-header-info">
-        <div id="modal-program" class="modal-title"></div>
-        <div id="modal-meta" class="modal-meta"></div>
+        <div class="modal-title">Edit Event</div>
       </div>
       <button class="btn btn-ghost btn-icon" id="event-modal-close">&#10005;</button>
     </div>
     <div class="modal-body">
+      <div class="field-row">
+        <div class="field field--grow">
+          <label for="edit-program">Event Name</label>
+          <input type="text" id="edit-program" placeholder="e.g. Spring Concert">
+        </div>
+        <div class="field">
+          <label for="edit-date">Date</label>
+          <input type="date" id="edit-date">
+        </div>
+      </div>
+      <div class="field-row">
+        <div class="field field--grow">
+          <label for="edit-venue">Venue</label>
+          <input type="text" id="edit-venue" placeholder="e.g. Tata Theatre">
+        </div>
+        <div class="field field--grow">
+          <label for="edit-team">Team</label>
+          <input type="text" id="edit-team" placeholder="e.g. Dr.Rao/Team">
+        </div>
+      </div>
       <div class="field">
         <label for="edit-sound">Sound Requirements</label>
-        <textarea id="edit-sound" rows="5" placeholder="e.g. 2 cordless mics, playback laptop, NCPA basic sound, sound check 6pm"></textarea>
+        <textarea id="edit-sound" rows="4" placeholder="e.g. 2 cordless mics, playback laptop, NCPA basic sound, sound check 6pm"></textarea>
       </div>
       <div class="field">
         <label for="edit-calltime">Call Time</label>
         <input type="text" id="edit-calltime" placeholder="e.g. 2:00pm">
-        <span class="field-hint">Time when sound must be ready</span>
       </div>
       <div class="field">
         <label for="edit-rider">Rider</label>
@@ -290,7 +308,7 @@
       </div>
       <div class="field">
         <label for="edit-notes">Notes</label>
-        <textarea id="edit-notes" rows="3" placeholder="Internal notes…"></textarea>
+        <textarea id="edit-notes" rows="2" placeholder="Internal notes…"></textarea>
       </div>
       <div class="field" id="modal-crew-section" style="display:none">
         <label>Assigned Crew</label>
@@ -298,6 +316,7 @@
       </div>
     </div>
     <div class="modal-footer">
+      <button class="btn btn-danger" id="modal-delete-btn">Delete</button>
       <div id="modal-status" class="save-status"></div>
       <button class="btn btn-primary" id="modal-save-btn">Save</button>
     </div>

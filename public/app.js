@@ -195,21 +195,23 @@ function openEventModal(id) {
   if (!ev) return
   state.currentEventId = id
 
-  $('modal-program').textContent = ev.program || '—'
-  $('modal-meta').textContent    = `${ev.event_date} · ${ev.venue || ''}${ev.team ? ' · ' + ev.team : ''}`
-  $('edit-sound').value          = ev.sound_requirements || ''
-  $('edit-calltime').value       = ev.call_time || ''
-  $('edit-rider').value          = ev.rider || ''
-  $('edit-notes').value          = ev.notes || ''
-  $('modal-status').textContent  = ''
-  $('modal-status').className    = 'save-status'
+  $('edit-program').value  = ev.program || ''
+  $('edit-date').value     = ev.event_date || ''
+  $('edit-venue').value    = ev.venue || ''
+  $('edit-team').value     = ev.team || ''
+  $('edit-sound').value    = ev.sound_requirements || ''
+  $('edit-calltime').value = ev.call_time || ''
+  $('edit-rider').value    = ev.rider || ''
+  $('edit-notes').value    = ev.notes || ''
+  $('modal-status').textContent = ''
+  $('modal-status').className   = 'save-status'
 
   // Reset crew section
   $('modal-crew-section').style.display = 'none'
   $('modal-crew-list').innerHTML = ''
 
   $('event-modal').classList.remove('hidden')
-  $('edit-sound').focus()
+  $('edit-program').focus()
 
   // Fetch crew assignments asynchronously
   GET(`/api/events/${id}/assignments`).then(crew => {
@@ -234,26 +236,27 @@ function closeEventModal() {
 async function saveEvent() {
   const id = state.currentEventId
   if (!id) return
-  const sound = $('edit-sound').value.trim()
-  const call  = $('edit-calltime').value.trim()
-  const rider = $('edit-rider').value.trim() || null
-  const notes = $('edit-notes').value.trim() || null
-  const st    = $('modal-status')
+  const program = $('edit-program').value.trim()
+  const date    = $('edit-date').value.trim()
+  const venue   = $('edit-venue').value.trim()
+  const team    = $('edit-team').value.trim()
+  const sound   = $('edit-sound').value.trim()
+  const call    = $('edit-calltime').value.trim()
+  const rider   = $('edit-rider').value.trim() || null
+  const notes   = $('edit-notes').value.trim() || null
+  const st      = $('modal-status')
 
   st.textContent = 'Saving…'
   st.className   = 'save-status'
 
   const result = await PUT(`/api/events/${id}`, {
-    sound_requirements: sound,
-    call_time: call,
-    rider,
-    notes
+    program, event_date: date, venue, team,
+    sound_requirements: sound, call_time: call, rider, notes
   })
 
   if (result?.success) {
-    // Update local state
     const ev = state.events.find(e => String(e.id) === String(id))
-    if (ev) { ev.sound_requirements = sound; ev.call_time = call; ev.rider = rider; ev.notes = notes }
+    if (ev) { ev.program = program; ev.event_date = date; ev.venue = venue; ev.team = team; ev.sound_requirements = sound; ev.call_time = call; ev.rider = rider; ev.notes = notes }
     renderCalendar()
     st.textContent = '✓ Saved'
     st.className   = 'save-status save-status--ok'
@@ -261,6 +264,22 @@ async function saveEvent() {
   } else {
     st.textContent = result?.error || 'Save failed'
     st.className   = 'save-status save-status--err'
+  }
+}
+
+async function deleteEvent() {
+  const id = state.currentEventId
+  if (!id) return
+  if (!confirm('Delete this event? This cannot be undone.')) return
+  const st = $('modal-status')
+  st.textContent = 'Deleting…'; st.className = 'save-status'
+  const result = await DEL(`/api/events/${id}`)
+  if (result?.success !== false) {
+    state.events = state.events.filter(e => String(e.id) !== String(id))
+    renderCalendar()
+    closeEventModal()
+  } else {
+    st.textContent = 'Delete failed'; st.className = 'save-status save-status--err'
   }
 }
 
@@ -440,6 +459,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   on('event-modal-close',    'click', closeEventModal)
   on('event-modal-backdrop', 'click', closeEventModal)
   on('modal-save-btn',       'click', saveEvent)
+  on('modal-delete-btn',     'click', deleteEvent)
   on('edit-sound', 'keydown', e => { if (e.ctrlKey && e.key === 'Enter') saveEvent() })
 
   // ── Settings ──
